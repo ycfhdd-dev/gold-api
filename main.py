@@ -1,7 +1,7 @@
 from flask import Flask, jsonify
 import requests, re, os
 
-TOKEN   = os.environ.get("8133745607:AAEbrb2IMx2-zUhKDSleYPe4cHC1B-chph4", "")
+TOKEN   = os.environ.get("BOT_TOKEN", "")
 CHANNEL = -1003598540317
 
 app = Flask(__name__)
@@ -9,23 +9,31 @@ app = Flask(__name__)
 
 def fetch_prices():
     """اجلب آخر رسالة من القناة عبر Bot API"""
-    url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?limit=20"
-    r   = requests.get(url, timeout=10)
+    url  = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset=-1&limit=1"
+    r    = requests.get(url, timeout=10)
     data = r.json()
 
-    if not data.get("ok"):
+    if not data.get("ok") or not data["result"]:
         return None
 
-    # ابحث عن آخر رسالة تحتوي على XAU999
-    text = None
-    for update in reversed(data["result"]):
-        post = update.get("channel_post", {})
-        t    = post.get("text", "")
-        if "XAU999" in t:
-            text = t
-            break
+    # خذ آخر رسالة
+    update = data["result"][-1]
+    post   = update.get("channel_post", {})
+    text   = post.get("text", "")
 
-    if not text:
+    # لو آخر رسالة ليست أسعار → ابحث في آخر 20 رسالة
+    if "XAU999" not in text:
+        url2  = f"https://api.telegram.org/bot{TOKEN}/getUpdates?limit=20"
+        r2    = requests.get(url2, timeout=10)
+        data2 = r2.json()
+        if data2.get("ok"):
+            for update in reversed(data2["result"]):
+                t = update.get("channel_post", {}).get("text", "")
+                if "XAU999" in t:
+                    text = t
+                    break
+
+    if "XAU999" not in text:
         return None
 
     patterns = {
