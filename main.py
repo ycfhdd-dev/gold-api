@@ -1,55 +1,54 @@
 from flask import Flask, jsonify
 import requests, re, os
 
-TOKEN   = os.environ.get("BOT_TOKEN", "")
-CHANNEL = -1003598540317
+TOKEN    = os.environ.get("BOT_TOKEN", "")
+CHANNEL  = "@golderpdz"   # اسم القناة العامة
 
 app = Flask(__name__)
 
 
 def fetch_prices():
-    """اجلب آخر رسالة من القناة عبر Bot API"""
-    url  = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset=-1&limit=1"
-    r    = requests.get(url, timeout=10)
-    data = r.json()
+    """
+    اجلب آخر رسائل القناة عبر الاسم العام للقناة.
+    نستخدم forwardMessage لجلب آخر رسالة تحتوي أسعار.
+    """
+    # جلب آخر 10 تحديثات
+    for offset in ["-1", None]:
+        params = {"limit": 20}
+        if offset:
+            params["offset"] = offset
 
-    if not data.get("ok") or not data["result"]:
-        return None
+        url  = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+        r    = requests.get(url, params=params, timeout=10)
+        data = r.json()
 
-    # خذ آخر رسالة
-    update = data["result"][-1]
-    post   = update.get("channel_post", {})
-    text   = post.get("text", "")
+        if not data.get("ok"):
+            continue
 
-    # لو آخر رسالة ليست أسعار → ابحث في آخر 20 رسالة
-    if "XAU999" not in text:
-        url2  = f"https://api.telegram.org/bot{TOKEN}/getUpdates?limit=20"
-        r2    = requests.get(url2, timeout=10)
-        data2 = r2.json()
-        if data2.get("ok"):
-            for update in reversed(data2["result"]):
-                t = update.get("channel_post", {}).get("text", "")
-                if "XAU999" in t:
-                    text = t
-                    break
+        for update in reversed(data.get("result", [])):
+            text = (
+                update.get("channel_post", {}).get("text", "") or
+                update.get("message", {}).get("text", "")
+            )
+            if "XAU999" in text:
+                return _extract(text)
 
-    if "XAU999" not in text:
-        return None
+    return None
 
+
+def _extract(text):
     patterns = {
-        "gold_999":   r"XAU999=(\d+)",
-        "silver_999": r"XAG999=(\d+)",
-        "eur":        r"EUR=(\d+)",
-        "usd":        r"USD=(\d+)",
+        "gold_999":   r"XAU999=(\d+(?:\.\d+)?)",
+        "silver_999": r"XAG999=(\d+(?:\.\d+)?)",
+        "eur":        r"EUR=(\d+(?:\.\d+)?)",
+        "usd":        r"USD=(\d+(?:\.\d+)?)",
     }
-
     prices = {}
     for key, pattern in patterns.items():
         match = re.search(pattern, text)
         if match:
             prices[key] = float(match.group(1))
-
-    return prices if prices else None
+    return prices if len(prices) == 4 else None
 
 
 @app.route("/prices")
@@ -58,6 +57,14 @@ def get_prices():
     if prices:
         return jsonify({"ok": True, "prices": prices})
     return jsonify({"ok": False, "error": "لا توجد أسعار"}), 500
+
+
+@app.route("/debug")
+def debug():
+    """للتشخيص فقط — يعرض آخر رسائل البوت"""
+    url  = f"https://api.telegram.org/bot{TOKEN}/getUpdates?limit=20"
+    r    = requests.get(url, timeout=10)
+    return r.json()
 
 
 @app.route("/")
