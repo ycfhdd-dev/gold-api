@@ -30,13 +30,46 @@ def fetch_prices():
                 update.get("channel_post", {}).get("text", "") or
                 update.get("message", {}).get("text", "")
             )
+            # الرسالة الجديدة
+            if "XAU_LOCAL_AVG" in text:
+                return _extract_new(text)
+            # الرسالة القديمة (احتياطي)
             if "XAU999" in text:
-                return _extract(text)
+                return _extract_old(text)
 
     return None
 
 
-def _extract(text):
+def _extract_new(text):
+    """تحليل شكل الرسالة الجديد: DATE=...XAU_LOCAL_AVG=..."""
+    patterns = {
+        "gold_999":   r"XAU_LOCAL_AVG=(\d+(?:\.\d+)?)",
+        "silver_999": r"XAG_LOCAL_AVG=(\d+(?:\.\d+)?)",
+        "eur":        r"FX_EUR_DZD=(\d+(?:\.\d+)?)",
+        "usd":        r"FX_USD_DZD=(\d+(?:\.\d+)?)",
+        # حقول إضافية من الرسالة الجديدة
+        "gold_world_usd": r"XAU_WORLD_USD=(\d+(?:\.\d+)?)",
+        "gold_world_eur": r"XAU_WORLD_EUR=(\d+(?:\.\d+)?)",
+        "silver_world_usd": r"XAG_WORLD_USD=(\d+(?:\.\d+)?)",
+        "silver_world_eur": r"XAG_WORLD_EUR=(\d+(?:\.\d+)?)",
+        "gold_local_usd": r"XAU_LOCAL_USD=(\d+(?:\.\d+)?)",
+        "gold_local_eur": r"XAU_LOCAL_EUR=(\d+(?:\.\d+)?)",
+        "silver_local_usd": r"XAG_LOCAL_USD=(\d+(?:\.\d+)?)",
+        "silver_local_eur": r"XAG_LOCAL_EUR=(\d+(?:\.\d+)?)",
+        "eur_usd":    r"FX_USD_EUR=(\d+(?:\.\d+)?)",
+    }
+    prices = {}
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text)
+        if match:
+            prices[key] = float(match.group(1))
+    # نتحقق فقط من الحقول الأساسية الأربعة
+    required = {"gold_999", "silver_999", "eur", "usd"}
+    return prices if required.issubset(prices.keys()) else None
+
+
+def _extract_old(text):
+    """تحليل شكل الرسالة القديم: XAU999=..."""
     patterns = {
         "gold_999":   r"XAU999=(\d+(?:\.\d+)?)",
         "silver_999": r"XAG999=(\d+(?:\.\d+)?)",
