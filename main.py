@@ -87,9 +87,31 @@ def _extract_old(text):
 @app.route("/prices")
 def get_prices():
     prices = fetch_prices()
-    if prices:
-        return jsonify({"ok": True, "prices": prices})
-    return jsonify({"ok": False, "error": "لا توجد أسعار"}), 500
+    if not prices:
+        return jsonify({"ok": False, "error": "لا توجد أسعار"}), 500
+
+    # هيكل جديد — نُرجع الحقول مسطّحة مباشرة
+    # حتى يتوافق مع price_dialog.py الذي يتوقع XAU_LOCAL_AVG مباشرة
+    if "gold_world_usd" in prices:
+        flat = {
+            "XAU_LOCAL_AVG":  prices.get("gold_999",        0),
+            "XAG_LOCAL_AVG":  prices.get("silver_999",      0),
+            "XAU_LOCAL_USD":  prices.get("gold_local_usd",  0),
+            "XAU_LOCAL_EUR":  prices.get("gold_local_eur",  0),
+            "XAG_LOCAL_USD":  prices.get("silver_local_usd",0),
+            "XAG_LOCAL_EUR":  prices.get("silver_local_eur",0),
+            "XAU_WORLD_USD":  prices.get("gold_world_usd",  0),
+            "XAU_WORLD_EUR":  prices.get("gold_world_eur",  0),
+            "XAG_WORLD_USD":  prices.get("silver_world_usd",0),
+            "XAG_WORLD_EUR":  prices.get("silver_world_eur",0),
+            "FX_USD_DZD":     prices.get("usd",             0),
+            "FX_EUR_DZD":     prices.get("eur",             0),
+            "FX_USD_EUR":     prices.get("eur_usd",         0),
+        }
+        return jsonify(flat)
+
+    # هيكل قديم — نُرجعه كما كان
+    return jsonify({"ok": True, "prices": prices})
 
 
 @app.route("/debug")
