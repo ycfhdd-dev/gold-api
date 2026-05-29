@@ -2,17 +2,12 @@ from flask import Flask, jsonify
 import requests, re, os
 
 TOKEN    = os.environ.get("BOT_TOKEN", "")
-CHANNEL  = "@golderpdz"   # اسم القناة العامة
+CHANNEL  = "@golderpdz"
 
 app = Flask(__name__)
 
 
 def fetch_prices():
-    """
-    اجلب آخر رسائل القناة عبر الاسم العام للقناة.
-    نستخدم forwardMessage لجلب آخر رسالة تحتوي أسعار.
-    """
-    # جلب آخر 10 تحديثات
     for offset in ["-1", None]:
         params = {"limit": 20}
         if offset:
@@ -30,10 +25,8 @@ def fetch_prices():
                 update.get("channel_post", {}).get("text", "") or
                 update.get("message", {}).get("text", "")
             )
-            # الرسالة الجديدة
             if "XAU_LOCAL_AVG" in text:
                 return _extract_new(text)
-            # الرسالة القديمة (احتياطي)
             if "XAU999" in text:
                 return _extract_old(text)
 
@@ -41,35 +34,35 @@ def fetch_prices():
 
 
 def _extract_new(text):
-    """تحليل شكل الرسالة الجديد: DATE=...XAU_LOCAL_AVG=..."""
     patterns = {
-        "gold_999":   r"XAU_LOCAL_AVG=(\d+(?:\.\d+)?)",
-        "silver_999": r"XAG_LOCAL_AVG=(\d+(?:\.\d+)?)",
-        "eur":        r"FX_EUR_DZD=(\d+(?:\.\d+)?)",
-        "usd":        r"FX_USD_DZD=(\d+(?:\.\d+)?)",
-        # حقول إضافية من الرسالة الجديدة
-        "gold_world_usd": r"XAU_WORLD_USD=(\d+(?:\.\d+)?)",
-        "gold_world_eur": r"XAU_WORLD_EUR=(\d+(?:\.\d+)?)",
+        "gold_999":         r"XAU_LOCAL_AVG=(\d+(?:\.\d+)?)",
+        "silver_999":       r"XAG_LOCAL_AVG=(\d+(?:\.\d+)?)",
+        "eur":              r"FX_EUR_DZD=(\d+(?:\.\d+)?)",
+        "usd":              r"FX_USD_DZD=(\d+(?:\.\d+)?)",
+        # ✅ حقول شراء جديدة
+        "eur_buy":          r"FX_EUR_DZD_BUY=(\d+(?:\.\d+)?)",
+        "usd_buy":          r"FX_USD_DZD_BUY=(\d+(?:\.\d+)?)",
+        # حقول إضافية
+        "gold_world_usd":   r"XAU_WORLD_USD=(\d+(?:\.\d+)?)",
+        "gold_world_eur":   r"XAU_WORLD_EUR=(\d+(?:\.\d+)?)",
         "silver_world_usd": r"XAG_WORLD_USD=(\d+(?:\.\d+)?)",
         "silver_world_eur": r"XAG_WORLD_EUR=(\d+(?:\.\d+)?)",
-        "gold_local_usd": r"XAU_LOCAL_USD=(\d+(?:\.\d+)?)",
-        "gold_local_eur": r"XAU_LOCAL_EUR=(\d+(?:\.\d+)?)",
+        "gold_local_usd":   r"XAU_LOCAL_USD=(\d+(?:\.\d+)?)",
+        "gold_local_eur":   r"XAU_LOCAL_EUR=(\d+(?:\.\d+)?)",
         "silver_local_usd": r"XAG_LOCAL_USD=(\d+(?:\.\d+)?)",
         "silver_local_eur": r"XAG_LOCAL_EUR=(\d+(?:\.\d+)?)",
-        "eur_usd":    r"FX_USD_EUR=(\d+(?:\.\d+)?)",
+        "eur_usd":          r"FX_USD_EUR=(\d+(?:\.\d+)?)",
     }
     prices = {}
     for key, pattern in patterns.items():
         match = re.search(pattern, text)
         if match:
             prices[key] = float(match.group(1))
-    # نتحقق فقط من الحقول الأساسية الأربعة
     required = {"gold_999", "silver_999", "eur", "usd"}
     return prices if required.issubset(prices.keys()) else None
 
 
 def _extract_old(text):
-    """تحليل شكل الرسالة القديم: XAU999=..."""
     patterns = {
         "gold_999":   r"XAU999=(\d+(?:\.\d+)?)",
         "silver_999": r"XAG999=(\d+(?:\.\d+)?)",
@@ -90,8 +83,6 @@ def get_prices():
     if not prices:
         return jsonify({"ok": False, "error": "لا توجد أسعار"}), 500
 
-    # هيكل جديد — نُرجع الحقول مسطّحة مباشرة
-    # حتى يتوافق مع price_dialog.py الذي يتوقع XAU_LOCAL_AVG مباشرة
     if "gold_world_usd" in prices:
         flat = {
             "XAU_LOCAL_AVG":  prices.get("gold_999",        0),
@@ -107,16 +98,17 @@ def get_prices():
             "FX_USD_DZD":     prices.get("usd",             0),
             "FX_EUR_DZD":     prices.get("eur",             0),
             "FX_USD_EUR":     prices.get("eur_usd",         0),
+            # ✅ حقول شراء جديدة
+            "FX_USD_DZD_BUY": prices.get("usd_buy",         0),
+            "FX_EUR_DZD_BUY": prices.get("eur_buy",         0),
         }
         return jsonify(flat)
 
-    # هيكل قديم — نُرجعه كما كان
     return jsonify({"ok": True, "prices": prices})
 
 
 @app.route("/debug")
 def debug():
-    """للتشخيص فقط — يعرض آخر رسائل البوت"""
     url  = f"https://api.telegram.org/bot{TOKEN}/getUpdates?limit=20"
     r    = requests.get(url, timeout=10)
     return r.json()
