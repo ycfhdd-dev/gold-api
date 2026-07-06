@@ -1,13 +1,40 @@
-from flask import Flask, jsonify
-import requests, re, os
+from flask import Flask, jsonify, request
+import requests, re, os, datetime
 
 TOKEN    = os.environ.get("BOT_TOKEN", "")
-CHANNEL  = "@golderpdz"
+CHANNEL  = "@golderpdz"   # اسم القناة العامة
+
+# ── إعدادات Supabase (أرشيف الأسعار الدائم) ──────────────────────────────
+SUPABASE_URL   = os.environ.get("SUPABASE_URL", "").rstrip("/")   # مثال: https://xxxx.supabase.co
+SUPABASE_KEY   = os.environ.get("SUPABASE_KEY", "")               # service_role key
+LOG_TOKEN      = os.environ.get("LOG_TOKEN", "")                  # سرّ بسيط لحماية /log
 
 app = Flask(__name__)
 
 
+def _now_algeria():
+    """
+    الجزائر UTC+1 طوال السنة (بدون توقيت صيفي).
+    Render يشتغل بتوقيت UTC، فنحسب المحلي يدوياً بدل الاعتماد على أي DEFAULT
+    من قاعدة البيانات (نفس المبدأ المتبع في sell_scrap لتفادي فرق الساعة).
+    """
+    return datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+
+
+def _supabase_headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
 def fetch_prices():
+    """
+    اجلب آخر رسائل القناة عبر الاسم العام للقناة.
+    نستخدم forwardMessage لجلب آخر رسالة تحتوي أسعار.
+    """
+    # جلب آخر 10 تحديثات
     for offset in ["-1", None]:
         params = {"limit": 20}
         if offset:
@@ -25,8 +52,10 @@ def fetch_prices():
                 update.get("channel_post", {}).get("text", "") or
                 update.get("message", {}).get("text", "")
             )
+            # الرسالة الجديدة
             if "XAU_LOCAL_AVG" in text:
                 return _extract_new(text)
+            # الرسالة القديمة (احتياطي)
             if "XAU999" in text:
                 return _extract_old(text)
 
@@ -34,24 +63,21 @@ def fetch_prices():
 
 
 def _extract_new(text):
+    """تحليل شكل الرسالة الجديد: DATE=...XAU_LOCAL_AVG=..."""
     patterns = {
-        "gold_999":         r"XAU_LOCAL_AVG=(\d+(?:\.\d+)?)",
-        "silver_999":       r"XAG_LOCAL_AVG=(\d+(?:\.\d+)?)",
-        "eur":              r"FX_EUR_DZD=(\d+(?:\.\d+)?)",
-        "usd":              r"FX_USD_DZD=(\d+(?:\.\d+)?)",
-        # ✅ حقول شراء جديدة
-        "eur_buy":          r"FX_EUR_DZD_BUY=(\d+(?:\.\d+)?)",
-        "usd_buy":          r"FX_USD_DZD_BUY=(\d+(?:\.\d+)?)",
-        # حقول إضافية
-        "gold_world_usd":   r"XAU_WORLD_USD=(\d+(?:\.\d+)?)",
-        "gold_world_eur":   r"XAU_WORLD_EUR=(\d+(?:\.\d+)?)",
+        "gold_999":   r"XAU_LOCAL_AVG=(\d+(?:\.\d+)?)",
+        "silver_999": r"XAG_LOCAL_AVG=(\d+(?:\.\d+)?)",
+        "eur":        r"FX_EUR_DZD=(\d+(?:\.\d+)?)",
+        "usd":        r"FX_USD_DZD=(\d+(?:\.\d+)?)",
+        "gold_world_usd": r"XAU_WORLD_USD=(\d+(?:\.\d+)?)",
+        "gold_world_eur": r"XAU_WORLD_EUR=(\d+(?:\.\d+)?)",
         "silver_world_usd": r"XAG_WORLD_USD=(\d+(?:\.\d+)?)",
         "silver_world_eur": r"XAG_WORLD_EUR=(\d+(?:\.\d+)?)",
-        "gold_local_usd":   r"XAU_LOCAL_USD=(\d+(?:\.\d+)?)",
-        "gold_local_eur":   r"XAU_LOCAL_EUR=(\d+(?:\.\d+)?)",
+        "gold_local_usd": r"XAU_LOCAL_USD=(\d+(?:\.\d+)?)",
+        "gold_local_eur": r"XAU_LOCAL_EUR=(\d+(?:\.\d+)?)",
         "silver_local_usd": r"XAG_LOCAL_USD=(\d+(?:\.\d+)?)",
         "silver_local_eur": r"XAG_LOCAL_EUR=(\d+(?:\.\d+)?)",
-        "eur_usd":          r"FX_USD_EUR=(\d+(?:\.\d+)?)",
+        "eur_usd":    r"FX_USD_EUR=(\d+(?:\.\d+)?)",
     }
     prices = {}
     for key, pattern in patterns.items():
@@ -63,6 +89,7 @@ def _extract_new(text):
 
 
 def _extract_old(text):
+    """تحليل شكل الرسالة القديم: XAU999=..."""
     patterns = {
         "gold_999":   r"XAU999=(\d+(?:\.\d+)?)",
         "silver_999": r"XAG999=(\d+(?:\.\d+)?)",
@@ -80,35 +107,78 @@ def _extract_old(text):
 @app.route("/prices")
 def get_prices():
     prices = fetch_prices()
+    if prices:
+        return jsonify({"ok": True, "prices": prices})
+    return jsonify({"ok": False, "error": "لا توجد أسعار"}), 500
+
+
+@app.route("/log")
+def log_price():
+    if not LOG_TOKEN or request.args.get("token") != LOG_TOKEN:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return jsonify({"ok": False, "error": "Supabase غير مهيأ (SUPABASE_URL/SUPABASE_KEY)"}), 500
+
+    prices = fetch_prices()
     if not prices:
-        return jsonify({"ok": False, "error": "لا توجد أسعار"}), 500
+        return jsonify({"ok": False, "error": "لا توجد أسعار لتسجيلها"}), 500
 
-    if "gold_world_usd" in prices:
-        flat = {
-            "XAU_LOCAL_AVG":  prices.get("gold_999",        0),
-            "XAG_LOCAL_AVG":  prices.get("silver_999",      0),
-            "XAU_LOCAL_USD":  prices.get("gold_local_usd",  0),
-            "XAU_LOCAL_EUR":  prices.get("gold_local_eur",  0),
-            "XAG_LOCAL_USD":  prices.get("silver_local_usd",0),
-            "XAG_LOCAL_EUR":  prices.get("silver_local_eur",0),
-            "XAU_WORLD_USD":  prices.get("gold_world_usd",  0),
-            "XAU_WORLD_EUR":  prices.get("gold_world_eur",  0),
-            "XAG_WORLD_USD":  prices.get("silver_world_usd",0),
-            "XAG_WORLD_EUR":  prices.get("silver_world_eur",0),
-            "FX_USD_DZD":     prices.get("usd",             0),
-            "FX_EUR_DZD":     prices.get("eur",             0),
-            "FX_USD_EUR":     prices.get("eur_usd",         0),
-            # ✅ حقول شراء جديدة
-            "FX_USD_DZD_BUY": prices.get("usd_buy",         0),
-            "FX_EUR_DZD_BUY": prices.get("eur_buy",         0),
-        }
-        return jsonify(flat)
+    row = {
+        "recorded_at": _now_algeria().strftime("%Y-%m-%d %H:%M:%S"),
+        "source":      "cron",
+        "gold_999":    prices.get("gold_999"),
+        "silver_999":  prices.get("silver_999"),
+        "eur":         prices.get("eur"),
+        "usd":         prices.get("usd"),
+    }
 
-    return jsonify({"ok": True, "prices": prices})
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/price_history",
+            headers=_supabase_headers(),
+            json=row,
+            timeout=10,
+        )
+        r.raise_for_status()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"فشل الحفظ في Supabase: {e}"}), 500
+
+    return jsonify({"ok": True, "logged": row})
+
+
+@app.route("/history")
+def get_history():
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return jsonify({"ok": False, "error": "Supabase غير مهيأ"}), 500
+
+    since = request.args.get("since", "").strip()
+    params = {
+        "select": "recorded_at,source,gold_999,silver_999,eur,usd",
+        "order":  "recorded_at.asc",
+        "limit":  "20000",
+    }
+    if since:
+        params["recorded_at"] = f"gt.{since}"
+
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/price_history",
+            headers=_supabase_headers(),
+            params=params,
+            timeout=15,
+        )
+        r.raise_for_status()
+        rows = r.json()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"فشل الجلب من Supabase: {e}"}), 500
+
+    return jsonify({"ok": True, "count": len(rows), "history": rows})
 
 
 @app.route("/debug")
 def debug():
+    """للتشخيص فقط — يعرض آخر رسائل البوت"""
     url  = f"https://api.telegram.org/bot{TOKEN}/getUpdates?limit=20"
     r    = requests.get(url, timeout=10)
     return r.json()
