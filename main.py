@@ -4,6 +4,9 @@ import requests, re, os, datetime
 TOKEN    = os.environ.get("BOT_TOKEN", "")
 CHANNEL  = "@golderpdz"   # اسم القناة العامة
 
+# كم ساعة ننتظر قبل ما نسجّل "نبضة تأكيد" حتى لو السعر ما تبدّلش
+HEARTBEAT_HOURS = 4
+
 # ── إعدادات Supabase (أرشيف الأسعار الدائم) ──────────────────────────────
 SUPABASE_URL   = os.environ.get("SUPABASE_URL", "").rstrip("/")   # مثال: https://xxxx.supabase.co
 SUPABASE_KEY   = os.environ.get("SUPABASE_KEY", "")               # service_role key
@@ -23,6 +26,27 @@ def _supabase_headers():
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
     }
+
+
+def _get_last_row():
+    """يجيب آخر صف مسجَّل في price_history (أو None عند الفشل/الجدول فارغ)."""
+    try:
+        params = {
+            "select": "recorded_at,xau_local_avg,xag_local_avg,fx_eur_dzd,fx_usd_dzd",
+            "order":  "recorded_at.desc",
+            "limit":  "1",
+        }
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/price_history",
+            headers=_supabase_headers(),
+            params=params,
+            timeout=15,
+        )
+        r.raise_for_status()
+        rows = r.json()
+        return rows[0] if rows else None
+    except Exception:
+        return None
 
 
 def fetch_prices():
@@ -169,8 +193,48 @@ def log_price():
     if not prices:
         return jsonify({"ok": False, "error": "لا توجد رسائل جديدة لتسجيلها من تليجرام"}), 500
 
+    now  = _now_algeria()
+    last = _get_last_row()
+
+    def _r2(v):
+        try:
+            return round(float(v), 2)
+        except Exception:
+            return None
+
+    same_price = False
+    if last:
+        same_price = (
+            _r2(last.get("xau_local_avg")) == _r2(prices.get("gold_999")) and
+            _r2(last.get("xag_local_avg")) == _r2(prices.get("silver_999")) and
+            _r2(last.get("fx_eur_dzd"))    == _r2(prices.get("eur")) and
+            _r2(last.get("fx_usd_dzd"))    == _r2(prices.get("usd"))
+        )
+
+    should_log = True
+    reason     = "سعر جديد"
+
+    if last and same_price:
+        should_log = True  # افتراضياً نسجّل، إلا لو تأكدنا إن الوقت لم يحن بعد
+        try:
+            last_dt_str = (last.get("recorded_at") or "").replace("T", " ").replace("Z", "")
+            if "." in last_dt_str:
+                last_dt_str = last_dt_str.split(".")[0]
+            last_dt = datetime.datetime.strptime(last_dt_str, "%Y-%m-%d %H:%M:%S")
+            elapsed_h = (now - last_dt).total_seconds() / 3600.0
+            if elapsed_h < HEARTBEAT_HOURS:
+                should_log = False
+                reason = f"السعر ثابت (آخر تسجيل قبل {elapsed_h:.1f} ساعة، أقل من {HEARTBEAT_HOURS})"
+            else:
+                reason = f"نبضة تأكيد كل {HEARTBEAT_HOURS} ساعات (السعر ما زال ثابتاً)"
+        except Exception:
+            pass  # لو فشل تحليل التاريخ، الأسلم أننا نسجّل بدل ما نفوّت بيانات
+
+    if not should_log:
+        return jsonify({"ok": True, "skipped": True, "reason": reason})
+
     row = {
-        "recorded_at":   _now_algeria().strftime("%Y-%m-%d %H:%M:%S"),
+        "recorded_at":   now.strftime("%Y-%m-%d %H:%M:%S"),
         "source":        "cron",
         "xau_local_avg": prices.get("gold_999"),
         "xag_local_avg": prices.get("silver_999"),
@@ -189,7 +253,7 @@ def log_price():
     except Exception as e:
         return jsonify({"ok": False, "error": f"فشل الحفظ في Supabase: {e}"}), 500
 
-    return jsonify({"ok": True, "logged": row})
+    return jsonify({"ok": True, "logged": row, "reason": reason})
 
 
 @app.route("/history")
