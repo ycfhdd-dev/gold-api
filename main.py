@@ -58,7 +58,7 @@ def fetch_prices():
 
 
 def fetch_last_from_supabase():
-    """حبل النجاة للمستخدم: جلب آخر سعر حقيقي مسجل في قاعدة البيانات لو تعطل تليجرام"""
+    """حبل النجاة للمستخدم: جلب آخر سعر حقيقي مسجل من قاعدة البيانات في حال تعطل تليجرام"""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return None
     try:
@@ -131,23 +131,27 @@ def get_prices():
         prices = fetch_last_from_supabase()
 
     if prices:
+        # تطابق كامل مع متطلبات دالة fetch_live_api_price_999 في تطبيق المستخدم
         formatted_prices = {
-            "ok": True,
-            "prices": {
-                "XAU_LOCAL_AVG": prices.get("gold_999"),
-                "XAG_LOCAL_AVG": prices.get("silver_999"),
-                "XAU999": prices.get("gold_999"),
-                "XAG999": prices.get("silver_999"),
-                "FX_EUR_DZD": prices.get("eur"),
-                "FX_USD_DZD": prices.get("usd"),
-                "EUR": prices.get("eur"),
-                "USD": prices.get("usd"),
-                "gold_999": prices.get("gold_999"),
-                "silver_999": prices.get("silver_999"),
-                "eur": prices.get("eur"),
-                "usd": prices.get("usd")
-            }
+            "XAU_LOCAL_AVG": prices.get("gold_999"),
+            "XAG_LOCAL_AVG": prices.get("silver_999"),
+            "XAU_LOCAL_USD": prices.get("gold_local_usd") or prices.get("gold_999"),
+            "XAG_LOCAL_USD": prices.get("silver_local_usd") or prices.get("silver_999"),
+            "XAU_LOCAL_EUR": prices.get("gold_local_eur") or prices.get("gold_999"),
+            "XAG_LOCAL_EUR": prices.get("silver_local_eur") or prices.get("silver_999"),
+            "XAU999": prices.get("gold_999"),
+            "XAG999": prices.get("silver_999"),
+            "FX_EUR_DZD": prices.get("eur"),
+            "FX_USD_DZD": prices.get("usd"),
+            "EUR": prices.get("eur"),
+            "USD": prices.get("usd"),
+            "gold_999": prices.get("gold_999"),
+            "silver_999": prices.get("silver_999"),
+            "eur": prices.get("eur"),
+            "usd": prices.get("usd")
         }
+        # إرجاع المتغيرات مباشرة في الـ root JSON لتسهيل قراءتها من التطبيق
+        formatted_prices["ok"] = True
         return jsonify(formatted_prices)
         
     return jsonify({"ok": False, "error": "لا توجد أسعار متاحة حالياً"}), 500
@@ -195,17 +199,16 @@ def get_history():
 
     since = request.args.get("since", "").strip()
     
-    # حل مشكلة الفاصل الزمني: إذا كان المدخل يحتوي على مسافة، نستبدلها بـ T لتفهمها قاعدة البيانات أثناء الفلترة
-    if since and " " in since:
-        since = since.replace(" ", "T")
-
     params = {
         "select": "recorded_at,source,gold_999,silver_999,eur,usd",
         "order":  "recorded_at.asc",
         "limit":  "20000",
     }
+    
     if since:
-        params["recorded_at"] = f"gt.{since}"
+        # تحويل المسافة إلى T لتفهم قاعدة البيانات عملية المقارنة الزمنية
+        since_clean = since.replace(" ", "T")
+        params["recorded_at"] = f"gt.{since_clean}"
 
     try:
         r = requests.get(
@@ -217,10 +220,26 @@ def get_history():
         r.raise_for_status()
         rows = r.json()
         
-        # تعديل جوهري هنا: تحويل حرف T إلى مسافة فارغة في النتائج المرجعة للمستخدم لمنع تعطل برنامجه
+        # حبل النجاة للمزامنة: لو أرجع الفلتر المعتمد على الوقت صفراً بسبب اختلافات التوقيت بين الأجهزة
+        # نسحب تلقائياً أحدث 50 سجلاً من قاعدة البيانات بدلاً من إرجاع مصفوفة فارغة تعطل المستخدم
+        if not rows and since:
+            fallback_params = {
+                "select": "recorded_at,source,gold_999,silver_999,eur,usd",
+                "order":  "recorded_at.desc",
+                "limit":  "50",
+            }
+            r_fb = requests.get(f"{SUPABASE_URL}/rest/v1/price_history", headers=_supabase_headers(), params=fallback_params, timeout=10)
+            if r_fb.status_code == 200:
+                rows = r_fb.json()
+                rows.reverse() # إعادة الترتيب ليصبح تصاعدياً كما يتوقعه التطبيق
+        
+        # تنظيف حقل الوقت بالكامل قبل تسليمه للبرنامج المحلي (إزالة حرف T وحرف Z والأجزاء من الثانية)
         for row in rows:
             if "recorded_at" in row and row["recorded_at"]:
-                row["recorded_at"] = row["recorded_at"].replace("T", " ")
+                clean_dt = row["recorded_at"].replace("T", " ").replace("Z", "")
+                if "." in clean_dt:
+                    clean_dt = clean_dt.split(".")[0]
+                row["recorded_at"] = clean_dt
                 
     except Exception as e:
         return jsonify({"ok": False, "error": f"فشل الجلب من Supabase: {e}"}), 500
