@@ -13,11 +13,7 @@ app = Flask(__name__)
 
 
 def _now_algeria():
-    """
-    الجزائر UTC+1 طوال السنة (بدون توقيت صيفي).
-    Render يشتغل بتوقيت UTC، فنحسب المحلي يدوياً بدل الاعتماد على أي DEFAULT
-    من قاعدة البيانات (نفس المبدأ المتبع في sell_scrap لتفادي فرق الساعة).
-    """
+    """الجزائر UTC+1 طوال السنة."""
     return datetime.datetime.utcnow() + datetime.timedelta(hours=1)
 
 
@@ -30,19 +26,18 @@ def _supabase_headers():
 
 
 def fetch_prices():
-    """
-    اجلب آخر رسائل القناة عبر الاسم العام للقناة.
-    نستخدم forwardMessage لجلب آخر رسالة تحتوي أسعار.
-    """
-    # جلب آخر 10 تحديثات
+    """اجلب آخر رسائل القناة عبر getUpdates."""
     for offset in ["-1", None]:
         params = {"limit": 20}
         if offset:
             params["offset"] = offset
 
         url  = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
-        r    = requests.get(url, params=params, timeout=10)
-        data = r.json()
+        try:
+            r    = requests.get(url, params=params, timeout=10)
+            data = r.json()
+        except Exception:
+            continue
 
         if not data.get("ok"):
             continue
@@ -59,6 +54,35 @@ def fetch_prices():
             if "XAU999" in text:
                 return _extract_old(text)
 
+    return None
+
+
+def fetch_last_from_supabase():
+    """
+    حبل النجاة للمستخدم: إذا لم نجد رسائل جديدة في تليجرام،
+    نجلب آخر سعر حقيقي مسجل في قاعدة البيانات لكي لا يظهر خطأ للمستخدم.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
+    try:
+        # ترتيب تنازلي حسب الوقت لجلب السطر الأحدث فقط limit=1
+        params = {
+            "select": "gold_999,silver_999,eur,usd",
+            "order": "recorded_at.desc",
+            "limit": "1"
+        }
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/price_history", headers=_supabase_headers(), params=params, timeout=5)
+        rows = r.json()
+        if rows and len(rows) > 0:
+            last_row = rows[0]
+            return {
+                "gold_999": last_row.get("gold_999"),
+                "silver_999": last_row.get("silver_999"),
+                "eur": last_row.get("eur"),
+                "usd": last_row.get("usd")
+            }
+    except Exception as e:
+        print(f"فشل جلب الاحتياطي من Supabase: {e}")
     return None
 
 
@@ -106,13 +130,19 @@ def _extract_old(text):
 
 @app.route("/prices")
 def get_prices():
+    # 1. محاولة جلب أحدث سعر من تليجرام
     prices = fetch_prices()
+    
+    # 2. إذا تليجرام فارغ أو لم يستجب، اسحب آخر سعر محفوظ في قاعدة البيانات فوراً
+    if not prices:
+        prices = fetch_last_from_supabase()
+
+    # 3. إذا وجدنا أسعار (سواء من تليجرام أو قاعدة البيانات)، نرسلها بالصيغة المطلوبة للبرنامج
     if prices:
-        # نقوم بإعادة هيكلة البيانات لتطابق تماماً ما يبحث عنه برنامجك في الـ Logs
         formatted_prices = {
             "ok": True,
             "prices": {
-                # الأسماء التي يبحث عنها برنامجك بناءً على الـ Logs
+                # المسميات التي يبحث عنها برنامج المستخدم لضمان عدم حدوث خطأ "القيم صفر"
                 "XAU_LOCAL_AVG": prices.get("gold_999"),
                 "XAG_LOCAL_AVG": prices.get("silver_999"),
                 "XAU999": prices.get("gold_999"),
@@ -121,7 +151,7 @@ def get_prices():
                 "FX_USD_DZD": prices.get("usd"),
                 "EUR": prices.get("eur"),
                 "USD": prices.get("usd"),
-                # الاحتفاظ بالأسماء القديمة لضمان عدم تعطل أي جزء آخر
+                # الحفاظ على المسميات الافتراضية
                 "gold_999": prices.get("gold_999"),
                 "silver_999": prices.get("silver_999"),
                 "eur": prices.get("eur"),
@@ -129,7 +159,9 @@ def get_prices():
             }
         }
         return jsonify(formatted_prices)
-    return jsonify({"ok": False, "error": "لا توجد أسعار"}), 500
+        
+    # خيار الطوارئ الأخير (لو تعطل كل شيء)
+    return jsonify({"ok": False, "error": "لا توجد أسعار متاحة حالياً"}), 500
 
 
 @app.route("/log")
@@ -138,11 +170,11 @@ def log_price():
         return jsonify({"ok": False, "error": "unauthorized"}), 401
 
     if not SUPABASE_URL or not SUPABASE_KEY:
-        return jsonify({"ok": False, "error": "Supabase غير مهيأ (SUPABASE_URL/SUPABASE_KEY)"}), 500
+        return jsonify({"ok": False, "error": "Supabase غير مهيأ"}), 500
 
     prices = fetch_prices()
     if not prices:
-        return jsonify({"ok": False, "error": "لا توجد أسعار لتسجيلها"}), 500
+        return jsonify({"ok": False, "error": "لا توجد رسائل جديدة لتسجيلها من تليجرام"}), 500
 
     row = {
         "recorded_at": _now_algeria().strftime("%Y-%m-%d %H:%M:%S"),
@@ -198,7 +230,6 @@ def get_history():
 
 @app.route("/debug")
 def debug():
-    """للتشخيص فقط — يعرض آخر رسائل البوت"""
     url  = f"https://api.telegram.org/bot{TOKEN}/getUpdates?limit=20"
     r    = requests.get(url, timeout=10)
     return r.json()
