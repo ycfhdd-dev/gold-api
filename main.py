@@ -206,7 +206,7 @@ def get_history():
     }
     
     if since:
-        # تحويل المسافة إلى T لتفهم قاعدة البيانات عملية المقارنة الزمنية
+        # تحويل المسافة إلى T لتتوافق مع قاعدة البيانات في الفلترة
         since_clean = since.replace(" ", "T")
         params["recorded_at"] = f"gt.{since_clean}"
 
@@ -220,20 +220,12 @@ def get_history():
         r.raise_for_status()
         rows = r.json()
         
-        # حبل النجاة للمزامنة: لو أرجع الفلتر المعتمد على الوقت صفراً بسبب اختلافات التوقيت بين الأجهزة
-        # نسحب تلقائياً أحدث 50 سجلاً من قاعدة البيانات بدلاً من إرجاع مصفوفة فارغة تعطل المستخدم
-        if not rows and since:
-            fallback_params = {
-                "select": "recorded_at,source,gold_999,silver_999,eur,usd",
-                "order":  "recorded_at.desc",
-                "limit":  "50",
-            }
-            r_fb = requests.get(f"{SUPABASE_URL}/rest/v1/price_history", headers=_supabase_headers(), params=fallback_params, timeout=10)
-            if r_fb.status_code == 200:
-                rows = r_fb.json()
-                rows.reverse() # إعادة الترتيب ليصبح تصاعدياً كما يتوقعه التطبيق
+        # 💡 التعديل الجوهري:
+        # إذا كان البرنامج يرسل تاريخاً ("since") ولم نجد أسطر جديدة، نترك المصفوفة فارغة []
+        # لأن هذا يعني أن البرنامج محلياً يمتلك أسعاراً أحدث من السيرفر (أو متطابقة معها)، 
+        # وبذلك يفهم البرنامج المحلي أن المزامنة نجحت (ولكن لا توجد أسطر جديدة لإضافتها) فلا يظهر خطأ.
         
-        # تنظيف حقل الوقت بالكامل قبل تسليمه للبرنامج المحلي (إزالة حرف T وحرف Z والأجزاء من الثانية)
+        # تنظيف التواريخ في حال وجود بيانات جديدة فعلياً لإرسالها
         for row in rows:
             if "recorded_at" in row and row["recorded_at"]:
                 clean_dt = row["recorded_at"].replace("T", " ").replace("Z", "")
