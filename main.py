@@ -67,7 +67,7 @@ def fetch_last_from_supabase():
             "order": "recorded_at.desc",
             "limit": "1"
         }
-        r = requests.get(f"{SUPABASE_URL}/rest/v1/price_history", headers=_supabase_headers(), params=params, timeout=5)
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/price_history", headers=_supabase_headers(), params=params, timeout=15)
         rows = r.json()
         if rows and len(rows) > 0:
             last_row = rows[0]
@@ -183,7 +183,7 @@ def log_price():
             f"{SUPABASE_URL}/rest/v1/price_history",
             headers=_supabase_headers(),
             json=row,
-            timeout=10,
+            timeout=20,
         )
         r.raise_for_status()
     except Exception as e:
@@ -214,7 +214,7 @@ def get_history():
             f"{SUPABASE_URL}/rest/v1/price_history",
             headers=_supabase_headers(),
             params=params,
-            timeout=15,
+            timeout=20,
         )
         r.raise_for_status()
         raw_rows = r.json()
@@ -259,7 +259,7 @@ def get_history_view():
             f"{SUPABASE_URL}/rest/v1/price_history",
             headers=_supabase_headers(),
             params=params,
-            timeout=15,
+            timeout=20,
         )
         r.raise_for_status()
         rows = r.json()
