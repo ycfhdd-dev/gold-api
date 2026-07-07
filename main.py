@@ -58,14 +58,10 @@ def fetch_prices():
 
 
 def fetch_last_from_supabase():
-    """
-    حبل النجاة للمستخدم: إذا لم نجد رسائل جديدة في تليجرام،
-    نجلب آخر سعر حقيقي مسجل في قاعدة البيانات لكي لا يظهر خطأ للمستخدم.
-    """
+    """حبل النجاة للمستخدم: جلب آخر سعر حقيقي مسجل في قاعدة البيانات لو تعطل تليجرام"""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return None
     try:
-        # ترتيب تنازلي حسب الوقت لجلب السطر الأحدث فقط limit=1
         params = {
             "select": "gold_999,silver_999,eur,usd",
             "order": "recorded_at.desc",
@@ -130,19 +126,14 @@ def _extract_old(text):
 
 @app.route("/prices")
 def get_prices():
-    # 1. محاولة جلب أحدث سعر من تليجرام
     prices = fetch_prices()
-    
-    # 2. إذا تليجرام فارغ أو لم يستجب، اسحب آخر سعر محفوظ في قاعدة البيانات فوراً
     if not prices:
         prices = fetch_last_from_supabase()
 
-    # 3. إذا وجدنا أسعار (سواء من تليجرام أو قاعدة البيانات)، نرسلها بالصيغة المطلوبة للبرنامج
     if prices:
         formatted_prices = {
             "ok": True,
             "prices": {
-                # المسميات التي يبحث عنها برنامج المستخدم لضمان عدم حدوث خطأ "القيم صفر"
                 "XAU_LOCAL_AVG": prices.get("gold_999"),
                 "XAG_LOCAL_AVG": prices.get("silver_999"),
                 "XAU999": prices.get("gold_999"),
@@ -151,7 +142,6 @@ def get_prices():
                 "FX_USD_DZD": prices.get("usd"),
                 "EUR": prices.get("eur"),
                 "USD": prices.get("usd"),
-                # الحفاظ على المسميات الافتراضية
                 "gold_999": prices.get("gold_999"),
                 "silver_999": prices.get("silver_999"),
                 "eur": prices.get("eur"),
@@ -160,7 +150,6 @@ def get_prices():
         }
         return jsonify(formatted_prices)
         
-    # خيار الطوارئ الأخير (لو تعطل كل شيء)
     return jsonify({"ok": False, "error": "لا توجد أسعار متاحة حالياً"}), 500
 
 
@@ -205,6 +194,11 @@ def get_history():
         return jsonify({"ok": False, "error": "Supabase غير مهيأ"}), 500
 
     since = request.args.get("since", "").strip()
+    
+    # حل مشكلة الفاصل الزمني: إذا كان المدخل يحتوي على مسافة، نستبدلها بـ T لتفهمها قاعدة البيانات أثناء الفلترة
+    if since and " " in since:
+        since = since.replace(" ", "T")
+
     params = {
         "select": "recorded_at,source,gold_999,silver_999,eur,usd",
         "order":  "recorded_at.asc",
@@ -222,6 +216,12 @@ def get_history():
         )
         r.raise_for_status()
         rows = r.json()
+        
+        # تعديل جوهري هنا: تحويل حرف T إلى مسافة فارغة في النتائج المرجعة للمستخدم لمنع تعطل برنامجه
+        for row in rows:
+            if "recorded_at" in row and row["recorded_at"]:
+                row["recorded_at"] = row["recorded_at"].replace("T", " ")
+                
     except Exception as e:
         return jsonify({"ok": False, "error": f"فشل الجلب من Supabase: {e}"}), 500
 
