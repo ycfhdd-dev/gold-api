@@ -108,7 +108,27 @@ def _extract_old(text):
 def get_prices():
     prices = fetch_prices()
     if prices:
-        return jsonify({"ok": True, "prices": prices})
+        # نقوم بإعادة هيكلة البيانات لتطابق تماماً ما يبحث عنه برنامجك في الـ Logs
+        formatted_prices = {
+            "ok": True,
+            "prices": {
+                # الأسماء التي يبحث عنها برنامجك بناءً على الـ Logs
+                "XAU_LOCAL_AVG": prices.get("gold_999"),
+                "XAG_LOCAL_AVG": prices.get("silver_999"),
+                "XAU999": prices.get("gold_999"),
+                "XAG999": prices.get("silver_999"),
+                "FX_EUR_DZD": prices.get("eur"),
+                "FX_USD_DZD": prices.get("usd"),
+                "EUR": prices.get("eur"),
+                "USD": prices.get("usd"),
+                # الاحتفاظ بالأسماء القديمة لضمان عدم تعطل أي جزء آخر
+                "gold_999": prices.get("gold_999"),
+                "silver_999": prices.get("silver_999"),
+                "eur": prices.get("eur"),
+                "usd": prices.get("usd")
+            }
+        }
+        return jsonify(formatted_prices)
     return jsonify({"ok": False, "error": "لا توجد أسعار"}), 500
 
 
