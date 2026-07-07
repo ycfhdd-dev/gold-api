@@ -63,7 +63,7 @@ def fetch_last_from_supabase():
         return None
     try:
         params = {
-            "select": "gold_999,silver_999,eur,usd",
+            "select": "xau_local_avg,xag_local_avg,fx_eur_dzd,fx_usd_dzd",
             "order": "recorded_at.desc",
             "limit": "1"
         }
@@ -72,10 +72,10 @@ def fetch_last_from_supabase():
         if rows and len(rows) > 0:
             last_row = rows[0]
             return {
-                "gold_999": last_row.get("gold_999"),
-                "silver_999": last_row.get("silver_999"),
-                "eur": last_row.get("eur"),
-                "usd": last_row.get("usd")
+                "gold_999": last_row.get("xau_local_avg"),
+                "silver_999": last_row.get("xag_local_avg"),
+                "eur": last_row.get("fx_eur_dzd"),
+                "usd": last_row.get("fx_usd_dzd")
             }
     except Exception as e:
         print(f"فشل جلب الاحتياطي من Supabase: {e}")
@@ -170,12 +170,12 @@ def log_price():
         return jsonify({"ok": False, "error": "لا توجد رسائل جديدة لتسجيلها من تليجرام"}), 500
 
     row = {
-        "recorded_at": _now_algeria().strftime("%Y-%m-%d %H:%M:%S"),
-        "source":      "cron",
-        "gold_999":    prices.get("gold_999"),
-        "silver_999":  prices.get("silver_999"),
-        "eur":         prices.get("eur"),
-        "usd":         prices.get("usd"),
+        "recorded_at":   _now_algeria().strftime("%Y-%m-%d %H:%M:%S"),
+        "source":        "cron",
+        "xau_local_avg": prices.get("gold_999"),
+        "xag_local_avg": prices.get("silver_999"),
+        "fx_eur_dzd":    prices.get("eur"),
+        "fx_usd_dzd":    prices.get("usd"),
     }
 
     try:
@@ -200,7 +200,7 @@ def get_history():
     since = request.args.get("since", "").strip()
     
     params = {
-        "select": "recorded_at,source,gold_999,silver_999,eur,usd",
+        "select": "recorded_at,source,xau_local_avg,xag_local_avg,fx_eur_dzd,fx_usd_dzd",
         "order":  "recorded_at.asc",
         "limit":  "20000",
     }
@@ -217,30 +217,25 @@ def get_history():
             timeout=15,
         )
         r.raise_for_status()
-        rows = r.json()
-        
-        # 💡 خدعة ذكية لراحة البرنامج: 
-        # إذا كان جهاز المستخدم محدثاً بالكامل (rows فارغة)، نرسل له آخر سجل مسجل لدينا في السيرفر 
-        # البرنامج المحلي سيحاول إدخاله، وسيفشل الإدخال محلياً لأنه مكرر (بأمان تام)، 
-        # ولكن الدالة ستعيد عدد صفوف أكبر من 0 للواجهة، مما يمنع ظهور رسالة التحذير المزعجة!
-        if not rows:
-            fallback_params = {
-                "select": "recorded_at,source,gold_999,silver_999,eur,usd",
-                "order":  "recorded_at.desc",
-                "limit":  "1", # نرسل صف واحد فقط كإشارة نجاح
-            }
-            r_fb = requests.get(f"{SUPABASE_URL}/rest/v1/price_history", headers=_supabase_headers(), params=fallback_params, timeout=10)
-            if r_fb.status_code == 200 and r_fb.json():
-                rows = r_fb.json()
+        raw_rows = r.json()
 
-        # تنظيف التواريخ
-        for row in rows:
-            if "recorded_at" in row and row["recorded_at"]:
-                clean_dt = row["recorded_at"].replace("T", " ").replace("Z", "")
-                if "." in clean_dt:
-                    clean_dt = clean_dt.split(".")[0]
-                row["recorded_at"] = clean_dt
-                
+        # تحويل أسماء الأعمدة الجديدة لنفس المفاتيح القديمة اللي يتوقعها
+        # البرنامج المحلي (gold_999/silver_999/eur/usd) — بدون كسر التوافق،
+        # وبدون أي طلب احتياطي إضافي (كان يسبب بطء غير ضروري).
+        rows = []
+        for row in raw_rows:
+            clean_dt = (row.get("recorded_at") or "").replace("T", " ").replace("Z", "")
+            if "." in clean_dt:
+                clean_dt = clean_dt.split(".")[0]
+            rows.append({
+                "recorded_at": clean_dt,
+                "source":      row.get("source"),
+                "gold_999":    row.get("xau_local_avg"),
+                "silver_999":  row.get("xag_local_avg"),
+                "eur":         row.get("fx_eur_dzd"),
+                "usd":         row.get("fx_usd_dzd"),
+            })
+
     except Exception as e:
         return jsonify({"ok": False, "error": f"فشل الجلب من Supabase: {e}"}), 500
 
@@ -254,7 +249,7 @@ def get_history_view():
         return "<h2>Supabase غير مهيأ</h2>", 500
 
     params = {
-        "select": "recorded_at,source,gold_999,silver_999,eur,usd",
+        "select": "recorded_at,source,xau_local_avg,xag_local_avg,fx_eur_dzd,fx_usd_dzd",
         "order":  "recorded_at.desc",
         "limit":  "200",   # آخر 200 سجل فقط للعرض
     }
@@ -280,10 +275,10 @@ def get_history_view():
         <tr>
             <td>{recorded_at}</td>
             <td>{row.get('source', '')}</td>
-            <td>{row.get('gold_999', '')}</td>
-            <td>{row.get('silver_999', '')}</td>
-            <td>{row.get('eur', '')}</td>
-            <td>{row.get('usd', '')}</td>
+            <td>{row.get('xau_local_avg', '')}</td>
+            <td>{row.get('xag_local_avg', '')}</td>
+            <td>{row.get('fx_eur_dzd', '')}</td>
+            <td>{row.get('fx_usd_dzd', '')}</td>
         </tr>"""
 
     html = f"""
