@@ -246,6 +246,86 @@ def get_history():
 
     return jsonify({"ok": True, "count": len(rows), "history": rows})
 
+
+@app.route("/history/view")
+def get_history_view():
+    """صفحة HTML بسيطة لعرض أرشيف الأسعار بشكل جدول مقروء (للفحص اليدوي فقط)."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return "<h2>Supabase غير مهيأ</h2>", 500
+
+    params = {
+        "select": "recorded_at,source,gold_999,silver_999,eur,usd",
+        "order":  "recorded_at.desc",
+        "limit":  "200",   # آخر 200 سجل فقط للعرض
+    }
+
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/price_history",
+            headers=_supabase_headers(),
+            params=params,
+            timeout=15,
+        )
+        r.raise_for_status()
+        rows = r.json()
+    except Exception as e:
+        return f"<h2>فشل الجلب من Supabase: {e}</h2>", 500
+
+    rows_html = ""
+    for row in rows:
+        recorded_at = (row.get("recorded_at") or "").replace("T", " ").replace("Z", "")
+        if "." in recorded_at:
+            recorded_at = recorded_at.split(".")[0]
+        rows_html += f"""
+        <tr>
+            <td>{recorded_at}</td>
+            <td>{row.get('source', '')}</td>
+            <td>{row.get('gold_999', '')}</td>
+            <td>{row.get('silver_999', '')}</td>
+            <td>{row.get('eur', '')}</td>
+            <td>{row.get('usd', '')}</td>
+        </tr>"""
+
+    html = f"""
+    <!DOCTYPE html>
+    <html dir="rtl" lang="ar">
+    <head>
+        <meta charset="UTF-8">
+        <title>أرشيف الأسعار</title>
+        <style>
+            body {{ font-family: 'Segoe UI', Tahoma, sans-serif; background:#f3f3f3; margin:0; padding:20px; }}
+            h2 {{ color:#1a1a1a; }}
+            table {{ border-collapse: collapse; width:100%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.1); }}
+            th, td {{ padding:8px 14px; text-align:center; border-bottom:1px solid #e0e0e0; font-size:13px; }}
+            th {{ background:#0067c0; color:#fff; position:sticky; top:0; }}
+            tr:nth-child(even) {{ background:#fafafa; }}
+            .count {{ color:#5a5a5a; margin-bottom:10px; }}
+        </style>
+    </head>
+    <body>
+        <h2>📊 أرشيف الأسعار (آخر {len(rows)} سجل)</h2>
+        <div class="count">أحدث سجل أولاً</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>التاريخ والوقت</th>
+                    <th>المصدر</th>
+                    <th>ذهب 999</th>
+                    <th>فضة 999</th>
+                    <th>يورو</th>
+                    <th>دولار</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows_html}
+            </tbody>
+        </table>
+    </body>
+    </html>
+    """
+    return html
+
+
 @app.route("/debug")
 def debug():
     url  = f"https://api.telegram.org/bot{TOKEN}/getUpdates?limit=20"
