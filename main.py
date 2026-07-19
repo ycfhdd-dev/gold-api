@@ -32,7 +32,9 @@ def _get_last_row():
     """يجيب آخر صف مسجَّل في price_history (أو None عند الفشل/الجدول فارغ)."""
     try:
         params = {
-            "select": "recorded_at,xau_local_avg,xag_local_avg,fx_eur_dzd,fx_usd_dzd",
+            "select": ("recorded_at,xau_local_avg,xag_local_avg,fx_eur_dzd,fx_usd_dzd,"
+                       "xau_world_usd,xau_world_eur,xag_world_usd,xag_world_eur,"
+                       "fx_usd_dzd_buy,fx_eur_dzd_buy"),
             "order":  "recorded_at.desc",
             "limit":  "1",
         }
@@ -82,27 +84,38 @@ def fetch_prices():
 
 
 def fetch_last_from_supabase():
-    """حبل النجاة للمستخدم: جلب آخر سعر حقيقي مسجل من قاعدة البيانات في حال تعطل تليجرام"""
+    """المصدر الأساسي لِـ /prices: آخر سعر محفوظ في قاعدة البيانات — بدل
+    قراءة تيليجرام مباشرة في كل طلب (كانت تستهلك طابور getUpdates وتسبب
+    قيماً صفرية عشوائية عند تزاحم الطلبات مع الـ cron)."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return None
     try:
         params = {
-            "select": "xau_local_avg,xag_local_avg,fx_eur_dzd,fx_usd_dzd",
+            "select": ("xau_local_avg,xag_local_avg,fx_eur_dzd,fx_usd_dzd,"
+                       "xau_world_usd,xau_world_eur,xag_world_usd,xag_world_eur,"
+                       "fx_usd_dzd_buy,fx_eur_dzd_buy"),
             "order": "recorded_at.desc",
             "limit": "1"
         }
         r = requests.get(f"{SUPABASE_URL}/rest/v1/price_history", headers=_supabase_headers(), params=params, timeout=15)
+        r.raise_for_status()
         rows = r.json()
         if rows and len(rows) > 0:
-            last_row = rows[0]
+            row = rows[0]
             return {
-                "gold_999": last_row.get("xau_local_avg"),
-                "silver_999": last_row.get("xag_local_avg"),
-                "eur": last_row.get("fx_eur_dzd"),
-                "usd": last_row.get("fx_usd_dzd")
+                "gold_999":          row.get("xau_local_avg"),
+                "silver_999":        row.get("xag_local_avg"),
+                "eur":               row.get("fx_eur_dzd"),
+                "usd":               row.get("fx_usd_dzd"),
+                "gold_world_usd":    row.get("xau_world_usd"),
+                "gold_world_eur":    row.get("xau_world_eur"),
+                "silver_world_usd":  row.get("xag_world_usd"),
+                "silver_world_eur":  row.get("xag_world_eur"),
+                "fx_usd_dzd_buy":    row.get("fx_usd_dzd_buy"),
+                "fx_eur_dzd_buy":    row.get("fx_eur_dzd_buy"),
             }
     except Exception as e:
-        print(f"فشل جلب الاحتياطي من Supabase: {e}")
+        print(f"فشل جلب السعر من Supabase: {e}")
     return None
 
 
@@ -153,19 +166,20 @@ def _extract_old(text):
 
 @app.route("/prices")
 def get_prices():
-    prices = fetch_prices()
-    if not prices:
-        prices = fetch_last_from_supabase()
+    # ⚠️ لا نستدعي fetch_prices() هنا (كانت تستهلك رسالة تيليجرام من الطابور
+    # مباشرة عند كل فتح للنافذة/تحديث الصفحة). المصدر الوحيد الآن هو آخر
+    # صف محفوظ في Supabase، اللي يُحدَّث فقط عبر /log (الـ cron كل 5 دقائق).
+    prices = fetch_last_from_supabase()
 
     if prices:
         # تطابق كامل مع متطلبات دالة fetch_live_api_price_999 في تطبيق المستخدم
         formatted_prices = {
             "XAU_LOCAL_AVG": prices.get("gold_999"),
             "XAG_LOCAL_AVG": prices.get("silver_999"),
-            "XAU_LOCAL_USD": prices.get("gold_local_usd") or prices.get("gold_999"),
-            "XAG_LOCAL_USD": prices.get("silver_local_usd") or prices.get("silver_999"),
-            "XAU_LOCAL_EUR": prices.get("gold_local_eur") or prices.get("gold_999"),
-            "XAG_LOCAL_EUR": prices.get("silver_local_eur") or prices.get("silver_999"),
+            "XAU_LOCAL_USD": prices.get("gold_999"),
+            "XAG_LOCAL_USD": prices.get("silver_999"),
+            "XAU_LOCAL_EUR": prices.get("gold_999"),
+            "XAG_LOCAL_EUR": prices.get("silver_999"),
             "XAU999": prices.get("gold_999"),
             "XAG999": prices.get("silver_999"),
             "FX_EUR_DZD": prices.get("eur"),
@@ -176,18 +190,16 @@ def get_prices():
             "silver_999": prices.get("silver_999"),
             "eur": prices.get("eur"),
             "usd": prices.get("usd"),
-            # 🆕 كانت مفقودة بالكامل من الرد رغم أنها تُستخرج من الرسالة أعلاه
-            "XAU_WORLD_USD": prices.get("gold_world_usd", 0),
-            "XAU_WORLD_EUR": prices.get("gold_world_eur", 0),
-            "XAG_WORLD_USD": prices.get("silver_world_usd", 0),
-            "XAG_WORLD_EUR": prices.get("silver_world_eur", 0),
-            "FX_USD_DZD_BUY": prices.get("fx_usd_dzd_buy", 0),
-            "FX_EUR_DZD_BUY": prices.get("fx_eur_dzd_buy", 0),
+            "XAU_WORLD_USD": prices.get("gold_world_usd", 0) or 0,
+            "XAU_WORLD_EUR": prices.get("gold_world_eur", 0) or 0,
+            "XAG_WORLD_USD": prices.get("silver_world_usd", 0) or 0,
+            "XAG_WORLD_EUR": prices.get("silver_world_eur", 0) or 0,
+            "FX_USD_DZD_BUY": prices.get("fx_usd_dzd_buy", 0) or 0,
+            "FX_EUR_DZD_BUY": prices.get("fx_eur_dzd_buy", 0) or 0,
         }
-        # إرجاع المتغيرات مباشرة في الـ root JSON لتسهيل قراءتها من التطبيق
         formatted_prices["ok"] = True
         return jsonify(formatted_prices)
-        
+
     return jsonify({"ok": False, "error": "لا توجد أسعار متاحة حالياً"}), 500
 
 
@@ -215,10 +227,16 @@ def log_price():
     same_price = False
     if last:
         same_price = (
-            _r2(last.get("xau_local_avg")) == _r2(prices.get("gold_999")) and
-            _r2(last.get("xag_local_avg")) == _r2(prices.get("silver_999")) and
-            _r2(last.get("fx_eur_dzd"))    == _r2(prices.get("eur")) and
-            _r2(last.get("fx_usd_dzd"))    == _r2(prices.get("usd"))
+            _r2(last.get("xau_local_avg"))   == _r2(prices.get("gold_999")) and
+            _r2(last.get("xag_local_avg"))   == _r2(prices.get("silver_999")) and
+            _r2(last.get("fx_eur_dzd"))      == _r2(prices.get("eur")) and
+            _r2(last.get("fx_usd_dzd"))      == _r2(prices.get("usd")) and
+            _r2(last.get("xau_world_usd"))   == _r2(prices.get("gold_world_usd")) and
+            _r2(last.get("xau_world_eur"))   == _r2(prices.get("gold_world_eur")) and
+            _r2(last.get("xag_world_usd"))   == _r2(prices.get("silver_world_usd")) and
+            _r2(last.get("xag_world_eur"))   == _r2(prices.get("silver_world_eur")) and
+            _r2(last.get("fx_usd_dzd_buy"))  == _r2(prices.get("fx_usd_dzd_buy")) and
+            _r2(last.get("fx_eur_dzd_buy"))  == _r2(prices.get("fx_eur_dzd_buy"))
         )
 
     should_log = True
@@ -244,12 +262,18 @@ def log_price():
         return jsonify({"ok": True, "skipped": True, "reason": reason})
 
     row = {
-        "recorded_at":   now.strftime("%Y-%m-%d %H:%M:%S"),
-        "source":        "cron",
-        "xau_local_avg": prices.get("gold_999"),
-        "xag_local_avg": prices.get("silver_999"),
-        "fx_eur_dzd":    prices.get("eur"),
-        "fx_usd_dzd":    prices.get("usd"),
+        "recorded_at":     now.strftime("%Y-%m-%d %H:%M:%S"),
+        "source":          "cron",
+        "xau_local_avg":   prices.get("gold_999"),
+        "xag_local_avg":   prices.get("silver_999"),
+        "fx_eur_dzd":      prices.get("eur"),
+        "fx_usd_dzd":      prices.get("usd"),
+        "xau_world_usd":   prices.get("gold_world_usd"),
+        "xau_world_eur":   prices.get("gold_world_eur"),
+        "xag_world_usd":   prices.get("silver_world_usd"),
+        "xag_world_eur":   prices.get("silver_world_eur"),
+        "fx_usd_dzd_buy":  prices.get("fx_usd_dzd_buy"),
+        "fx_eur_dzd_buy":  prices.get("fx_eur_dzd_buy"),
     }
 
     try:
