@@ -34,7 +34,7 @@ def _get_last_row():
         params = {
             "select": ("recorded_at,xau_local_avg,xag_local_avg,fx_eur_dzd,fx_usd_dzd,"
                        "xau_world_usd,xau_world_eur,xag_world_usd,xag_world_eur,"
-                       "fx_usd_dzd_buy,fx_eur_dzd_buy"),
+                       "fx_usd_dzd_buy,fx_eur_dzd_buy,fx_usd_eur"),
             "order":  "recorded_at.desc",
             "limit":  "1",
         }
@@ -93,7 +93,7 @@ def fetch_last_from_supabase():
         params = {
             "select": ("xau_local_avg,xag_local_avg,fx_eur_dzd,fx_usd_dzd,"
                        "xau_world_usd,xau_world_eur,xag_world_usd,xag_world_eur,"
-                       "fx_usd_dzd_buy,fx_eur_dzd_buy"),
+                       "fx_usd_dzd_buy,fx_eur_dzd_buy,fx_usd_eur"),
             "order": "recorded_at.desc",
             "limit": "1"
         }
@@ -113,6 +113,7 @@ def fetch_last_from_supabase():
                 "silver_world_eur":  row.get("xag_world_eur"),
                 "fx_usd_dzd_buy":    row.get("fx_usd_dzd_buy"),
                 "fx_eur_dzd_buy":    row.get("fx_eur_dzd_buy"),
+                "eur_usd":           row.get("fx_usd_eur"),
             }
     except Exception as e:
         print(f"فشل جلب السعر من Supabase: {e}")
@@ -196,6 +197,7 @@ def get_prices():
             "XAG_WORLD_EUR": prices.get("silver_world_eur", 0) or 0,
             "FX_USD_DZD_BUY": prices.get("fx_usd_dzd_buy", 0) or 0,
             "FX_EUR_DZD_BUY": prices.get("fx_eur_dzd_buy", 0) or 0,
+            "FX_USD_EUR": prices.get("eur_usd", 0) or 0,
         }
         formatted_prices["ok"] = True
         return jsonify(formatted_prices)
@@ -236,7 +238,8 @@ def log_price():
             _r2(last.get("xag_world_usd"))   == _r2(prices.get("silver_world_usd")) and
             _r2(last.get("xag_world_eur"))   == _r2(prices.get("silver_world_eur")) and
             _r2(last.get("fx_usd_dzd_buy"))  == _r2(prices.get("fx_usd_dzd_buy")) and
-            _r2(last.get("fx_eur_dzd_buy"))  == _r2(prices.get("fx_eur_dzd_buy"))
+            _r2(last.get("fx_eur_dzd_buy"))  == _r2(prices.get("fx_eur_dzd_buy")) and
+            _r2(last.get("fx_usd_eur"))      == _r2(prices.get("eur_usd"))
         )
 
     should_log = True
@@ -274,6 +277,7 @@ def log_price():
         "xag_world_eur":   prices.get("silver_world_eur"),
         "fx_usd_dzd_buy":  prices.get("fx_usd_dzd_buy"),
         "fx_eur_dzd_buy":  prices.get("fx_eur_dzd_buy"),
+        "fx_usd_eur":      prices.get("eur_usd"),
     }
 
     try:
