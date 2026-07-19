@@ -122,6 +122,9 @@ def _extract_new(text):
         "silver_local_usd": r"XAG_LOCAL_USD=(\d+(?:\.\d+)?)",
         "silver_local_eur": r"XAG_LOCAL_EUR=(\d+(?:\.\d+)?)",
         "eur_usd":    r"FX_USD_EUR=(\d+(?:\.\d+)?)",
+        # 🆕 أسعار شراء الصرف — لم تكن تُقرأ إطلاقاً من قبل
+        "fx_usd_dzd_buy": r"FX_USD_DZD_BUY=(\d+(?:\.\d+)?)",
+        "fx_eur_dzd_buy": r"FX_EUR_DZD_BUY=(\d+(?:\.\d+)?)",
     }
     prices = {}
     for key, pattern in patterns.items():
@@ -172,7 +175,14 @@ def get_prices():
             "gold_999": prices.get("gold_999"),
             "silver_999": prices.get("silver_999"),
             "eur": prices.get("eur"),
-            "usd": prices.get("usd")
+            "usd": prices.get("usd"),
+            # 🆕 كانت مفقودة بالكامل من الرد رغم أنها تُستخرج من الرسالة أعلاه
+            "XAU_WORLD_USD": prices.get("gold_world_usd", 0),
+            "XAU_WORLD_EUR": prices.get("gold_world_eur", 0),
+            "XAG_WORLD_USD": prices.get("silver_world_usd", 0),
+            "XAG_WORLD_EUR": prices.get("silver_world_eur", 0),
+            "FX_USD_DZD_BUY": prices.get("fx_usd_dzd_buy", 0),
+            "FX_EUR_DZD_BUY": prices.get("fx_eur_dzd_buy", 0),
         }
         # إرجاع المتغيرات مباشرة في الـ root JSON لتسهيل قراءتها من التطبيق
         formatted_prices["ok"] = True
