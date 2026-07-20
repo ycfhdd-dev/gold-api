@@ -93,7 +93,8 @@ def fetch_last_from_supabase():
         params = {
             "select": ("xau_local_avg,xag_local_avg,fx_eur_dzd,fx_usd_dzd,"
                        "xau_world_usd,xau_world_eur,xag_world_usd,xag_world_eur,"
-                       "fx_usd_dzd_buy,fx_eur_dzd_buy,fx_usd_eur"),
+                       "fx_usd_dzd_buy,fx_eur_dzd_buy,fx_usd_eur,"
+                       "xau_local_usd,xau_local_eur,xag_local_usd,xag_local_eur"),
             "order": "recorded_at.desc",
             "limit": "1"
         }
@@ -114,6 +115,10 @@ def fetch_last_from_supabase():
                 "fx_usd_dzd_buy":    row.get("fx_usd_dzd_buy"),
                 "fx_eur_dzd_buy":    row.get("fx_eur_dzd_buy"),
                 "eur_usd":           row.get("fx_usd_eur"),
+                "gold_local_usd":    row.get("xau_local_usd"),
+                "gold_local_eur":    row.get("xau_local_eur"),
+                "silver_local_usd":  row.get("xag_local_usd"),
+                "silver_local_eur":  row.get("xag_local_eur"),
             }
     except Exception as e:
         print(f"فشل جلب السعر من Supabase: {e}")
@@ -177,10 +182,10 @@ def get_prices():
         formatted_prices = {
             "XAU_LOCAL_AVG": prices.get("gold_999"),
             "XAG_LOCAL_AVG": prices.get("silver_999"),
-            "XAU_LOCAL_USD": prices.get("gold_999"),
-            "XAG_LOCAL_USD": prices.get("silver_999"),
-            "XAU_LOCAL_EUR": prices.get("gold_999"),
-            "XAG_LOCAL_EUR": prices.get("silver_999"),
+            "XAU_LOCAL_USD": prices.get("gold_local_usd") or prices.get("gold_999"),
+            "XAG_LOCAL_USD": prices.get("silver_local_usd") or prices.get("silver_999"),
+            "XAU_LOCAL_EUR": prices.get("gold_local_eur") or prices.get("gold_999"),
+            "XAG_LOCAL_EUR": prices.get("silver_local_eur") or prices.get("silver_999"),
             "XAU999": prices.get("gold_999"),
             "XAG999": prices.get("silver_999"),
             "FX_EUR_DZD": prices.get("eur"),
@@ -278,6 +283,10 @@ def log_price():
         "fx_usd_dzd_buy":  prices.get("fx_usd_dzd_buy"),
         "fx_eur_dzd_buy":  prices.get("fx_eur_dzd_buy"),
         "fx_usd_eur":      prices.get("eur_usd"),
+        "xau_local_usd":   prices.get("gold_local_usd"),
+        "xau_local_eur":   prices.get("gold_local_eur"),
+        "xag_local_usd":   prices.get("silver_local_usd"),
+        "xag_local_eur":   prices.get("silver_local_eur"),
     }
 
     try:
@@ -302,7 +311,10 @@ def get_history():
     since = request.args.get("since", "").strip()
     
     params = {
-        "select": "recorded_at,source,xau_local_avg,xag_local_avg,fx_eur_dzd,fx_usd_dzd",
+        "select": ("recorded_at,source,xau_local_avg,xag_local_avg,fx_eur_dzd,fx_usd_dzd,"
+                   "xau_local_usd,xau_local_eur,xag_local_usd,xag_local_eur,"
+                   "xau_world_usd,xau_world_eur,xag_world_usd,xag_world_eur,"
+                   "fx_usd_dzd_buy,fx_eur_dzd_buy,fx_usd_eur"),
         "order":  "recorded_at.asc",
         "limit":  "20000",
     }
@@ -336,6 +348,17 @@ def get_history():
                 "silver_999":  row.get("xag_local_avg"),
                 "eur":         row.get("fx_eur_dzd"),
                 "usd":         row.get("fx_usd_dzd"),
+                "gold_usd":    row.get("xau_local_usd"),
+                "gold_eur":    row.get("xau_local_eur"),
+                "silver_usd":  row.get("xag_local_usd"),
+                "silver_eur":  row.get("xag_local_eur"),
+                "gold_world_usd":   row.get("xau_world_usd"),
+                "gold_world_eur":   row.get("xau_world_eur"),
+                "silver_world_usd": row.get("xag_world_usd"),
+                "silver_world_eur": row.get("xag_world_eur"),
+                "eur_buy":     row.get("fx_eur_dzd_buy"),
+                "usd_buy":     row.get("fx_usd_dzd_buy"),
+                "usd_eur":     row.get("fx_usd_eur"),
             })
 
     except Exception as e:
