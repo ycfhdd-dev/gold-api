@@ -374,7 +374,10 @@ def get_history_view():
         return "<h2>Supabase غير مهيأ</h2>", 500
 
     params = {
-        "select": "recorded_at,source,xau_local_avg,xag_local_avg,fx_eur_dzd,fx_usd_dzd",
+        "select": ("recorded_at,source,xau_local_avg,xag_local_avg,fx_eur_dzd,fx_usd_dzd,"
+                   "xau_local_usd,xau_local_eur,xag_local_usd,xag_local_eur,"
+                   "xau_world_usd,xau_world_eur,xag_world_usd,xag_world_eur,"
+                   "fx_usd_dzd_buy,fx_eur_dzd_buy,fx_usd_eur"),
         "order":  "recorded_at.desc",
         "limit":  "200",   # آخر 200 سجل فقط للعرض
     }
@@ -396,14 +399,35 @@ def get_history_view():
         recorded_at = (row.get("recorded_at") or "").replace("T", " ").replace("Z", "")
         if "." in recorded_at:
             recorded_at = recorded_at.split(".")[0]
+
+        def _v(key, dec=None):
+            val = row.get(key)
+            if val in (None, ''):
+                return '—'
+            try:
+                return f"{float(val):,.{dec}f}" if dec is not None else str(val)
+            except Exception:
+                return str(val)
+
         rows_html += f"""
         <tr>
             <td>{recorded_at}</td>
             <td>{row.get('source', '')}</td>
-            <td>{row.get('xau_local_avg', '')}</td>
-            <td>{row.get('xag_local_avg', '')}</td>
-            <td>{row.get('fx_eur_dzd', '')}</td>
-            <td>{row.get('fx_usd_dzd', '')}</td>
+            <td>{_v('xau_local_avg')}</td>
+            <td>{_v('xau_local_usd')}</td>
+            <td>{_v('xau_local_eur')}</td>
+            <td>{_v('xag_local_avg')}</td>
+            <td>{_v('xag_local_usd')}</td>
+            <td>{_v('xag_local_eur')}</td>
+            <td>{_v('xau_world_usd', 2)}</td>
+            <td>{_v('xau_world_eur', 2)}</td>
+            <td>{_v('xag_world_usd', 2)}</td>
+            <td>{_v('xag_world_eur', 2)}</td>
+            <td>{_v('fx_usd_dzd')}</td>
+            <td>{_v('fx_usd_dzd_buy')}</td>
+            <td>{_v('fx_eur_dzd')}</td>
+            <td>{_v('fx_eur_dzd_buy')}</td>
+            <td>{_v('fx_usd_eur', 4)}</td>
         </tr>"""
 
     html = f"""
@@ -416,24 +440,37 @@ def get_history_view():
             body {{ font-family: 'Segoe UI', Tahoma, sans-serif; background:#f3f3f3; margin:0; padding:20px; }}
             h2 {{ color:#1a1a1a; }}
             table {{ border-collapse: collapse; width:100%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.1); }}
-            th, td {{ padding:8px 14px; text-align:center; border-bottom:1px solid #e0e0e0; font-size:13px; }}
+            th, td {{ padding:8px 12px; text-align:center; border-bottom:1px solid #e0e0e0; font-size:12px; white-space:nowrap; }}
             th {{ background:#0067c0; color:#fff; position:sticky; top:0; }}
             tr:nth-child(even) {{ background:#fafafa; }}
             .count {{ color:#5a5a5a; margin-bottom:10px; }}
+            .grp1 {{ background:#fff7e0 !important; }}
+            .grp2 {{ background:#e8f4ff !important; }}
         </style>
     </head>
     <body>
         <h2>📊 أرشيف الأسعار (آخر {len(rows)} سجل)</h2>
-        <div class="count">أحدث سجل أولاً</div>
+        <div class="count">أحدث سجل أولاً — الذهب: متوسط / بورصة $ / بورصة € — الفضة: متوسط / بورصة $ / بورصة € — العالمي: أونصة $/€ — الصرف: بيع/شراء $ و€ + $ مقابل €</div>
         <table>
             <thead>
                 <tr>
                     <th>التاريخ والوقت</th>
                     <th>المصدر</th>
-                    <th>ذهب 999</th>
-                    <th>فضة 999</th>
-                    <th>يورو</th>
-                    <th>دولار</th>
+                    <th>ذهب متوسط</th>
+                    <th>ذهب $</th>
+                    <th>ذهب €</th>
+                    <th>فضة متوسط</th>
+                    <th>فضة $</th>
+                    <th>فضة €</th>
+                    <th>ذهب عالمي $</th>
+                    <th>ذهب عالمي €</th>
+                    <th>فضة عالمية $</th>
+                    <th>فضة عالمية €</th>
+                    <th>بيع $</th>
+                    <th>شراء $</th>
+                    <th>بيع €</th>
+                    <th>شراء €</th>
+                    <th>$ مقابل €</th>
                 </tr>
             </thead>
             <tbody>
