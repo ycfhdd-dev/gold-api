@@ -222,6 +222,27 @@ def log_price():
     if not prices:
         return jsonify({"ok": False, "error": "لا توجد رسائل جديدة لتسجيلها من تليجرام"}), 500
 
+    # 🆕 تحقق من سلامة البيانات: لو أي حقل سعري أساسي = 0 أو فاضٍ، نرفض
+    # التسجيل بالكامل بدل ما نحفظ صفاً ناقصاً في قاعدة البيانات (كان يحصل لو
+    # رسالة تليجرام جات ناقصة/غير مكتملة الصيغة).
+    _critical_fields = [
+        "gold_999", "silver_999", "eur", "usd",
+        "gold_world_usd", "gold_world_eur",
+        "silver_world_usd", "silver_world_eur",
+        "gold_local_usd", "gold_local_eur",
+        "silver_local_usd", "silver_local_eur",
+    ]
+    _bad_fields = [
+        f for f in _critical_fields
+        if not (prices.get(f) or 0)
+    ]
+    if _bad_fields:
+        return jsonify({
+            "ok": False,
+            "skipped": True,
+            "reason": "تم تجاهل التسجيل: قيم صفرية/ناقصة في: " + ", ".join(_bad_fields)
+        }), 200
+
     now  = _now_algeria()
     last = _get_last_row()
 
