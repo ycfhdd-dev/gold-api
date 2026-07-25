@@ -73,6 +73,15 @@ def fetch_prices():
                 update.get("channel_post", {}).get("text", "") or
                 update.get("message", {}).get("text", "")
             )
+
+            # 🆕 تجاهل رسائل التنبيه/الصيانة صراحةً (مثل "⚠️ القناة قيد
+            # الصيانة" أو "✅ تم استئناف التحديث") قبل أي محاولة استخراج —
+            # هذي الرسائل قد تذكر أسماء الحقول (XAU_LOCAL_AVG..) بدون قيم
+            # فعلية، وبدون هذا الفحص كانت fetch_prices ترجع None فوراً
+            # عليها بدل ما تكمل للرسالة الصالحة اللي قبلها.
+            if "الصيانة" in text or text.strip().startswith("⚠️") or text.strip().startswith("✅"):
+                continue
+
             # الرسالة الجديدة
             if "XAU_LOCAL_AVG" in text:
                 return _extract_new(text)
