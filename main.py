@@ -53,7 +53,7 @@ def _get_last_row():
 
 def fetch_prices():
     """اجلب آخر رسائل القناة عبر getUpdates."""
-    for offset in ["-1", None]:
+    for offset in [None]:
         params = {"limit": 20}
         if offset:
             params["offset"] = offset
