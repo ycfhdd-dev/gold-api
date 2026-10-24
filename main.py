@@ -192,16 +192,17 @@ XAG_MIN_DELTA = 5
 # حماية: قفزة أكبر من هذه النسبة عن آخر سعر مسجَّل تُرفض (غالباً خطأ في القراءة)
 MAX_JUMP_PCT  = 15
 
-_last_alert = {"t": 0.0}
+_last_alert = {}
 
 
-def _alert(text):
-    """تنبيه اختياري إلى محادثتك الخاصة (مرة كل ساعة كحد أقصى)."""
+def _alert(text, key="default", every_h=1.0):
+    """تنبيه اختياري إلى محادثتك الخاصة في تيليجرام. كل نوع (key) لا يتكرر قبل every_h ساعة."""
     if not TOKEN or not ALERT_CHAT_ID:
         return
-    if time.time() - _last_alert["t"] < 3600:
+    now_t = time.time()
+    if now_t - _last_alert.get(key, 0.0) < every_h * 3600:
         return
-    _last_alert["t"] = time.time()
+    _last_alert[key] = now_t
     try:
         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
                       data={"chat_id": ALERT_CHAT_ID, "text": text}, timeout=10)
@@ -248,6 +249,10 @@ def _fetch_suisse_metals():
                 if val and val > 0:
                     out[metal] = val
                     break
+    if not out:
+        title = re.search(r"<title>(.*?)</title>", html, re.S | re.I)
+        raise RuntimeError("suissegold: لا توجد أسعار EUR في الصفحة (الطول %d، العنوان: %s)" % (
+            len(html), (title.group(1).strip()[:60] if title else "بلا عنوان")))
     return out
 
 
@@ -269,6 +274,53 @@ def _fetch_eurodz():
         if code and buy and sell:
             rates[code.group(1)] = {"buy": buy, "sell": sell, "official": off}
     return rates
+
+
+def _fetch_devisesalgerie():
+    """احتياطي لأسعار الصرف: devisesalgerie.com (نفس نمط 'Euro 274 DA 276 DA' في سكريبت الشيت القديم)."""
+    r = requests.get("https://devisesalgerie.com/", headers=HTTP_HEADERS, timeout=15)
+    r.raise_for_status()
+    text = re.sub(r"<script.*?</script>|<style.*?</style>", " ", r.text, flags=re.S | re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"&nbsp;", " ", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    def rate(name):
+        m = re.search(name + r"\s+(\d+(?:[.,]\d+)?)\s*DA\s+(\d+(?:[.,]\d+)?)\s*DA", text, re.I)
+        if not m:
+            return None
+        return {"buy": float(m.group(1).replace(",", ".")),
+                "sell": float(m.group(2).replace(",", ".")), "official": None}
+
+    out = {}
+    for code, name in (("EUR", "Euro"), ("USD", "Dollar")):
+        v = rate(name)
+        if v:
+            out[code] = v
+    return out
+
+
+def _fx_ok(fx):
+    """يتأكد أن صفّي EUR/USD موجودان وبأسعار معقولة (دج لكل وحدة)."""
+    try:
+        return all(50 < fx[c]["buy"] <= fx[c]["sell"] * 1.05 and 50 < fx[c]["sell"] < 1000
+                   for c in ("EUR", "USD"))
+    except Exception:
+        return False
+
+
+def _fetch_fx():
+    """أسعار الصرف بالسوق الموازي: eurodz أولاً ثم devisesalgerie. يرجع (fx, اسم_المصدر)."""
+    errors = []
+    for name, fn in (("eurodz", _fetch_eurodz), ("devisesalgerie", _fetch_devisesalgerie)):
+        try:
+            fx = fn()
+            if _fx_ok(fx):
+                return fx, name
+            errors.append("%s: بيانات غير صالحة" % name)
+        except Exception as e:
+            errors.append("%s: %s" % (name, e))
+    raise RuntimeError("تعذّر جلب أسعار الصرف من كل المصادر — " + "; ".join(errors))
 
 
 def _fetch_usd_eur(fx):
@@ -312,17 +364,16 @@ def _fetch_metals_fallback(usd_eur, metals):
 
 def compute_prices_direct():
     """يرجع (prices, info) بنفس مفاتيح _extract_new حتى يعمل باقي الكود كما هو."""
-    fx = _fetch_eurodz()
-    if "EUR" not in fx or "USD" not in fx:
-        raise RuntimeError("eurodz: صفّا EUR/USD غير موجودين")
+    fx, fx_src = _fetch_fx()
     usd_eur, usd_eur_src = _fetch_usd_eur(fx)      # مثل FX_USD_EUR (0.8927)
     eur_usd = 1.0 / usd_eur                        # مثل F4 في الشيت (1.1204)
 
-    info = {"usd_eur_source": usd_eur_src, "metals_source": "suissegold"}
+    info = {"fx_source": fx_src, "usd_eur_source": usd_eur_src, "metals_source": "suissegold"}
     try:
         g = _fetch_suisse_metals()
     except Exception as e:
         print(f"فشل suissegold: {e}")
+        info["suisse_error"] = str(e)[:200]
         g = {}
     missing = [m for m in ("gold", "silver") if not g.get(m)]
     if missing:
@@ -446,7 +497,7 @@ def log_direct():
         prices, info = compute_prices_direct()
     except Exception as e:
         print(f"log_direct فشل: {e}")
-        _alert(f"⚠️ gold-api: فشل جلب الأسعار مباشرة\n{e}")
+        _alert(f"⚠️ تعذّر تحديث الأسعار\n{e}", key="fail", every_h=2)
         # 200 وليس 500: حتى لا يعطّل cron-job.org المهمة بعد الفشل المتكرر
         return jsonify({"ok": False, "skipped": True, "error": str(e)}), 200
 
@@ -493,7 +544,7 @@ def _store_prices(prices, source, direct=False):
             old, new = _r2(last.get(key)), _r2(prices.get(label))
             if old and new and abs(new - old) / old * 100 > MAX_JUMP_PCT:
                 msg = f"قفزة مشبوهة في {label}: {old} → {new} (أكثر من {MAX_JUMP_PCT}%) — لم يُسجَّل"
-                _alert("⚠️ gold-api: " + msg)
+                _alert("⚠️ لم يُسجَّل السعر الجديد\n" + msg, key="jump", every_h=2)
                 return jsonify({"ok": False, "skipped": True, "reason": msg}), 200
 
     same_price = False
@@ -749,6 +800,22 @@ def get_history_view():
     </html>
     """
     return html
+
+
+HEALTH_MAX_HOURS = 6   # أكبر من HEARTBEAT_HOURS (4) حتى لا ينذر بلا سبب
+
+
+@app.route("/health")
+def health():
+    """للمراقبة الخارجية (UptimeRobot): 200 إذا الأسعار حديثة، 503 إذا توقف التسجيل."""
+    last = _get_last_row()
+    dt = _parse_db_time(last.get("recorded_at")) if last else None
+    if not dt:
+        return jsonify({"ok": False, "error": "لا توجد بيانات أو تعذّر الوصول إلى Supabase"}), 503
+    age = (_now_algeria() - dt).total_seconds() / 3600.0
+    ok = age <= HEALTH_MAX_HOURS
+    return jsonify({"ok": ok, "last_record_hours_ago": round(age, 2),
+                    "max_hours": HEALTH_MAX_HOURS}), (200 if ok else 503)
 
 
 @app.route("/debug")
