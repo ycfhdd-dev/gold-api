@@ -811,9 +811,13 @@ def health():
     last = _get_last_row()
     dt = _parse_db_time(last.get("recorded_at")) if last else None
     if not dt:
+        _alert("⚠️ تعذّر قراءة آخر سعر من قاعدة البيانات", key="stale", every_h=3)
         return jsonify({"ok": False, "error": "لا توجد بيانات أو تعذّر الوصول إلى Supabase"}), 503
     age = (_now_algeria() - dt).total_seconds() / 3600.0
     ok = age <= HEALTH_MAX_HOURS
+    if not ok:
+        _alert("⚠️ توقف تسجيل الأسعار: آخر سعر قبل %.1f ساعة (الحد %d ساعات)" % (age, HEALTH_MAX_HOURS),
+               key="stale", every_h=3)
     return jsonify({"ok": ok, "last_record_hours_ago": round(age, 2),
                     "max_hours": HEALTH_MAX_HOURS}), (200 if ok else 503)
 
