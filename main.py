@@ -1,5 +1,5 @@
 from flask import Flask, jsonify, request
-import requests, re, os, datetime
+import requests, re, os, datetime, time
 
 TOKEN    = os.environ.get("BOT_TOKEN", "")
 CHANNEL  = "@golderpdz"   # اسم القناة العامة
@@ -11,6 +11,7 @@ HEARTBEAT_HOURS = 4
 SUPABASE_URL   = os.environ.get("SUPABASE_URL", "").rstrip("/")   # مثال: https://xxxx.supabase.co
 SUPABASE_KEY   = os.environ.get("SUPABASE_KEY", "")               # service_role key
 LOG_TOKEN      = os.environ.get("LOG_TOKEN", "")                  # سرّ بسيط لحماية /log
+ALERT_CHAT_ID  = os.environ.get("ALERT_CHAT_ID", "")              # (اختياري) محادثتك الخاصة لتنبيهات الأعطال
 
 app = Flask(__name__)
 
@@ -170,6 +171,196 @@ def _extract_old(text):
     return prices if len(prices) == 4 else None
 
 
+
+# ══════════════════════════════════════════════════════════════════════════
+#  الجلب المباشر للأسعار (بدون Google Sheet ولا تيليجرام)
+#  نفس معادلات صفحة Price في الشيت:
+#    B7  = سعر الغرام € × سعر بيع اليورو (eurodz)          → local_eur
+#    E7  = سعر الغرام € × (USD/EUR) × سعر بيع الدولار      → local_usd
+#    B33 = (B7 + E7) / 2                                    → xau_local_avg
+#    الأونصة = سعر الغرام € × 31.1035
+# ══════════════════════════════════════════════════════════════════════════
+OZ_GRAMS      = 31.1035
+SUISSE_URL    = "https://suissegold.com/ar/charts/gold"
+EURODZ_URL    = "https://eurodz.com/"
+HTTP_HEADERS  = {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")}
+
+# نفس عتبات سكريبت الشيت: لا تسجيل إلا إذا تغيّر الذهب ≥ 50 دج أو الفضة ≥ 5 دج
+XAU_MIN_DELTA = 50
+XAG_MIN_DELTA = 5
+# حماية: قفزة أكبر من هذه النسبة عن آخر سعر مسجَّل تُرفض (غالباً خطأ في القراءة)
+MAX_JUMP_PCT  = 15
+
+_last_alert = {"t": 0.0}
+
+
+def _alert(text):
+    """تنبيه اختياري إلى محادثتك الخاصة (مرة كل ساعة كحد أقصى)."""
+    if not TOKEN or not ALERT_CHAT_ID:
+        return
+    if time.time() - _last_alert["t"] < 3600:
+        return
+    _last_alert["t"] = time.time()
+    try:
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                      data={"chat_id": ALERT_CHAT_ID, "text": text}, timeout=10)
+    except Exception:
+        pass
+
+
+def _to_float(text):
+    m = re.search(r"\d[\d.,]*", text or "")
+    if not m:
+        return None
+    s = m.group()
+    if "," in s and "." in s:
+        s = s.replace(",", "")
+    elif "," in s:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _parse_db_time(s):
+    """يقرأ 2026-07-07T03:20:08.123+00:00 أو 2026-07-07 03:20:08 (يتجاهل الكسور والمنطقة)."""
+    m = re.match(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})", s or "")
+    if not m:
+        return None
+    return datetime.datetime.strptime(m.group(1) + " " + m.group(2), "%Y-%m-%d %H:%M:%S")
+
+
+def _fetch_suisse_metals():
+    """سعر غرام الذهب والفضة باليورو من بطاقات suissegold: {'gold': .., 'silver': ..}"""
+    r = requests.get(SUISSE_URL, headers=HTTP_HEADERS, timeout=15)
+    r.raise_for_status()
+    html = r.text
+    out = {}
+    for metal in ("gold", "silver"):
+        pattern = r'<a\b[^>]*href="[^"]*charts/%s"[^>]*>(.*?)</a>' % metal
+        for a in re.finditer(pattern, html, re.S | re.I):
+            # يشترط ظهور EUR بعد الرقم: لو تغيّرت العملة الافتراضية للموقع لا نقبل الرقم
+            m = re.search(r'class="price"[^>]*>\s*([\d.,]+)\s*EUR', a.group(1), re.I)
+            if m:
+                val = _to_float(m.group(1))
+                if val and val > 0:
+                    out[metal] = val
+                    break
+    return out
+
+
+def _fetch_eurodz():
+    """جدول eurodz: {'EUR': {'buy','sell','official'}, 'USD': {...}, ...}"""
+    r = requests.get(EURODZ_URL, headers=HTTP_HEADERS, timeout=15)
+    r.raise_for_status()
+    t = re.search(r"<table\b.*?</table>", r.text, re.S | re.I)
+    if not t:
+        raise RuntimeError("eurodz: لم يُعثر على الجدول")
+    rates = {}
+    for tr in re.findall(r"<tr\b.*?</tr>", t.group(0), re.S | re.I):
+        cells = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c)).strip()
+                 for c in re.findall(r"<td\b.*?</td>", tr, re.S | re.I)]
+        if len(cells) < 4:
+            continue
+        code = re.search(r"\(([A-Z]{3})\)", cells[0])
+        buy, sell, off = _to_float(cells[1]), _to_float(cells[2]), _to_float(cells[3])
+        if code and buy and sell:
+            rates[code.group(1)] = {"buy": buy, "sell": sell, "official": off}
+    return rates
+
+
+def _fetch_usd_eur(fx):
+    """سعر 1 دولار باليورو. مصادر بالترتيب: frankfurter (ECB) ← open.er-api ← أسعار eurodz الرسمية."""
+    for url in ("https://api.frankfurter.dev/v1/latest?base=USD&symbols=EUR",
+                "https://open.er-api.com/v6/latest/USD"):
+        try:
+            r = requests.get(url, headers=HTTP_HEADERS, timeout=10)
+            r.raise_for_status()
+            v = float(r.json()["rates"]["EUR"])
+            if 0.5 < v < 1.5:
+                return v, url.split("/")[2]
+        except Exception as e:
+            print(f"فشل مصدر USD/EUR {url}: {e}")
+    try:
+        off_eur = fx["EUR"]["official"]
+        off_usd = fx["USD"]["official"]
+        v = off_usd / off_eur          # (دج/$) ÷ (دج/€) = €/$
+        if 0.5 < v < 1.5:
+            return v, "eurodz-official"
+    except Exception:
+        pass
+    raise RuntimeError("تعذّر جلب سعر USD/EUR من كل المصادر")
+
+
+def _fetch_metals_fallback(usd_eur, metals):
+    """احتياطي إذا فشل suissegold: سعر الأونصة بالدولار من gold-api.com ثم التحويل إلى € للغرام."""
+    out = {}
+    for metal in metals:
+        sym = {"gold": "XAU", "silver": "XAG"}[metal]
+        try:
+            r = requests.get(f"https://api.gold-api.com/price/{sym}", headers=HTTP_HEADERS, timeout=10)
+            r.raise_for_status()
+            usd_oz = float(r.json()["price"])
+            if usd_oz > 0:
+                out[metal] = usd_oz * usd_eur / OZ_GRAMS
+        except Exception as e:
+            print(f"فشل الاحتياطي لـ {metal}: {e}")
+    return out
+
+
+def compute_prices_direct():
+    """يرجع (prices, info) بنفس مفاتيح _extract_new حتى يعمل باقي الكود كما هو."""
+    fx = _fetch_eurodz()
+    if "EUR" not in fx or "USD" not in fx:
+        raise RuntimeError("eurodz: صفّا EUR/USD غير موجودين")
+    usd_eur, usd_eur_src = _fetch_usd_eur(fx)      # مثل FX_USD_EUR (0.8927)
+    eur_usd = 1.0 / usd_eur                        # مثل F4 في الشيت (1.1204)
+
+    info = {"usd_eur_source": usd_eur_src, "metals_source": "suissegold"}
+    try:
+        g = _fetch_suisse_metals()
+    except Exception as e:
+        print(f"فشل suissegold: {e}")
+        g = {}
+    missing = [m for m in ("gold", "silver") if not g.get(m)]
+    if missing:
+        fb = _fetch_metals_fallback(usd_eur, missing)
+        g.update(fb)
+        info["metals_source"] = "fallback" if len(missing) == 2 else "suissegold + fallback"
+        info["fallback_used_for"] = sorted(fb)      # المعادن التي جاءت من المصدر الاحتياطي
+    if not g.get("gold") or not g.get("silver"):
+        raise RuntimeError("تعذّر جلب سعر الذهب/الفضة من كل المصادر")
+    info["gram_eur"] = g
+
+    eur_sell, usd_sell = fx["EUR"]["sell"], fx["USD"]["sell"]
+
+    def calc(gram_eur):
+        local_eur = gram_eur * eur_sell                       # B7 / B48
+        local_usd = gram_eur * eur_usd * usd_sell             # E7 / D48
+        return {
+            "avg":       int(round((local_eur + local_usd) / 2)),
+            "local_eur": round(local_eur, 2),
+            "local_usd": round(local_usd, 2),
+            "world_eur": round(gram_eur * OZ_GRAMS, 2),
+            "world_usd": round(gram_eur * OZ_GRAMS * eur_usd, 2),
+        }
+
+    au, ag = calc(g["gold"]), calc(g["silver"])
+    prices = {
+        "gold_999": au["avg"],            "silver_999": ag["avg"],
+        "eur": eur_sell,                  "usd": usd_sell,
+        "fx_eur_dzd_buy": fx["EUR"]["buy"], "fx_usd_dzd_buy": fx["USD"]["buy"],
+        "eur_usd": round(usd_eur, 4),
+        "gold_world_usd": au["world_usd"],   "gold_world_eur": au["world_eur"],
+        "silver_world_usd": ag["world_usd"], "silver_world_eur": ag["world_eur"],
+        "gold_local_usd": au["local_usd"],   "gold_local_eur": au["local_eur"],
+        "silver_local_usd": ag["local_usd"], "silver_local_eur": ag["local_eur"],
+    }
+    return prices, info
+
+
 @app.route("/prices")
 def get_prices():
     # ⚠️ لا نستدعي fetch_prices() هنا (كانت تستهلك رسالة تيليجرام من الطابور
@@ -210,31 +401,65 @@ def get_prices():
     return jsonify({"ok": False, "error": "لا توجد أسعار متاحة حالياً"}), 500
 
 
-@app.route("/log")
-def log_price():
+def _check_log_auth():
     if not LOG_TOKEN or request.args.get("token") != LOG_TOKEN:
         return jsonify({"ok": False, "error": "unauthorized"}), 401
+    return None
+
+
+@app.route("/log")
+def log_price():
+    """المسار القديم: يقرأ رسالة تيليجرام ثم يسجّلها. يبقى كما هو حتى نتأكد من المسار المباشر."""
+    denied = _check_log_auth()
+    if denied:
+        return denied
 
     if not SUPABASE_URL or not SUPABASE_KEY:
         return jsonify({"ok": False, "error": "Supabase غير مهيأ"}), 500
 
     prices = fetch_prices()
     if not prices:
-        # 🆕 "لا توجد رسالة تيليجرام جديدة" هي حالة طبيعية ومتوقعة تحدث
-        # باستمرار بين كل رسالة سعر والتالية (السكريبت لا يرسل كل 5 دقائق،
-        # بل فقط عند تغيّر كبير أو في أوقات محددة). هذه ليست خطأ حقيقياً في
-        # الخادم، فلا يجب أن تُرجَع كـ 500 — كانت تتسبب في تراكم "فشل" وهمي
-        # عند cron-job.org يؤدي لتعطيل مهمة التسجيل تلقائياً رغم أن كل شيء
-        # يعمل بشكل طبيعي تماماً.
+        # "لا توجد رسالة تيليجرام جديدة" حالة طبيعية، لا تُرجَع كـ 500 حتى لا
+        # يعطّل cron-job.org المهمة تلقائياً بعد تراكم الفشل.
         return jsonify({
             "ok": True,
             "skipped": True,
             "reason": "لا توجد رسالة سعر جديدة من تليجرام حالياً (حالة طبيعية)"
         }), 200
 
-    # 🆕 تحقق من سلامة البيانات: لو أي حقل سعري أساسي = 0 أو فاضٍ، نرفض
-    # التسجيل بالكامل بدل ما نحفظ صفاً ناقصاً في قاعدة البيانات (كان يحصل لو
-    # رسالة تليجرام جات ناقصة/غير مكتملة الصيغة).
+    return _store_prices(prices, "cron")
+
+
+@app.route("/log_direct")
+def log_direct():
+    """المسار الجديد: يجلب الأسعار من المواقع مباشرة ويحسبها بمعادلات الشيت.
+    ?dry=1 → يعرض الأرقام فقط بدون أي كتابة في Supabase (للمقارنة مع الشيت)."""
+    denied = _check_log_auth()
+    if denied:
+        return denied
+
+    dry = request.args.get("dry") in ("1", "true", "yes")
+    if not dry and (not SUPABASE_URL or not SUPABASE_KEY):
+        return jsonify({"ok": False, "error": "Supabase غير مهيأ"}), 500
+
+    try:
+        prices, info = compute_prices_direct()
+    except Exception as e:
+        print(f"log_direct فشل: {e}")
+        _alert(f"⚠️ gold-api: فشل جلب الأسعار مباشرة\n{e}")
+        # 200 وليس 500: حتى لا يعطّل cron-job.org المهمة بعد الفشل المتكرر
+        return jsonify({"ok": False, "skipped": True, "error": str(e)}), 200
+
+    if dry:
+        return jsonify({"ok": True, "dry_run": True, "prices": prices, "info": info})
+
+    return _store_prices(prices, "direct", direct=True)
+
+
+def _store_prices(prices, source, direct=False):
+    """التحقق + قرار التسجيل + الكتابة في price_history (مشترك بين المسارين)."""
+    # تحقق من سلامة البيانات: لو أي حقل سعري أساسي = 0 أو فاضٍ، نرفض التسجيل
+    # بالكامل بدل ما نحفظ صفاً ناقصاً في قاعدة البيانات.
     _critical_fields = [
         "gold_999", "silver_999", "eur", "usd",
         "gold_world_usd", "gold_world_eur",
@@ -262,47 +487,59 @@ def log_price():
         except Exception:
             return None
 
+    # حماية من القراءة الخاطئة (المسار المباشر فقط): قفزة كبيرة عن آخر سعر → نرفض
+    if direct and last:
+        for key, label in (("xau_local_avg", "gold_999"), ("xag_local_avg", "silver_999")):
+            old, new = _r2(last.get(key)), _r2(prices.get(label))
+            if old and new and abs(new - old) / old * 100 > MAX_JUMP_PCT:
+                msg = f"قفزة مشبوهة في {label}: {old} → {new} (أكثر من {MAX_JUMP_PCT}%) — لم يُسجَّل"
+                _alert("⚠️ gold-api: " + msg)
+                return jsonify({"ok": False, "skipped": True, "reason": msg}), 200
+
     same_price = False
     if last:
-        same_price = (
-            _r2(last.get("xau_local_avg"))   == _r2(prices.get("gold_999")) and
-            _r2(last.get("xag_local_avg"))   == _r2(prices.get("silver_999")) and
-            _r2(last.get("fx_eur_dzd"))      == _r2(prices.get("eur")) and
-            _r2(last.get("fx_usd_dzd"))      == _r2(prices.get("usd")) and
-            _r2(last.get("xau_world_usd"))   == _r2(prices.get("gold_world_usd")) and
-            _r2(last.get("xau_world_eur"))   == _r2(prices.get("gold_world_eur")) and
-            _r2(last.get("xag_world_usd"))   == _r2(prices.get("silver_world_usd")) and
-            _r2(last.get("xag_world_eur"))   == _r2(prices.get("silver_world_eur")) and
-            _r2(last.get("fx_usd_dzd_buy"))  == _r2(prices.get("fx_usd_dzd_buy")) and
-            _r2(last.get("fx_eur_dzd_buy"))  == _r2(prices.get("fx_eur_dzd_buy")) and
-            _r2(last.get("fx_usd_eur"))      == _r2(prices.get("eur_usd"))
-        )
+        if direct:
+            # نفس قاعدة الشيت: التغيير الصغير في المتوسطين = "لا جديد"
+            same_price = (
+                abs((_r2(last.get("xau_local_avg")) or 0) - prices["gold_999"])   < XAU_MIN_DELTA and
+                abs((_r2(last.get("xag_local_avg")) or 0) - prices["silver_999"]) < XAG_MIN_DELTA
+            )
+        else:
+            same_price = (
+                _r2(last.get("xau_local_avg"))   == _r2(prices.get("gold_999")) and
+                _r2(last.get("xag_local_avg"))   == _r2(prices.get("silver_999")) and
+                _r2(last.get("fx_eur_dzd"))      == _r2(prices.get("eur")) and
+                _r2(last.get("fx_usd_dzd"))      == _r2(prices.get("usd")) and
+                _r2(last.get("xau_world_usd"))   == _r2(prices.get("gold_world_usd")) and
+                _r2(last.get("xau_world_eur"))   == _r2(prices.get("gold_world_eur")) and
+                _r2(last.get("xag_world_usd"))   == _r2(prices.get("silver_world_usd")) and
+                _r2(last.get("xag_world_eur"))   == _r2(prices.get("silver_world_eur")) and
+                _r2(last.get("fx_usd_dzd_buy"))  == _r2(prices.get("fx_usd_dzd_buy")) and
+                _r2(last.get("fx_eur_dzd_buy"))  == _r2(prices.get("fx_eur_dzd_buy")) and
+                _r2(last.get("fx_usd_eur"))      == _r2(prices.get("eur_usd"))
+            )
 
     should_log = True
     reason     = "سعر جديد"
 
     if last and same_price:
         should_log = True  # افتراضياً نسجّل، إلا لو تأكدنا إن الوقت لم يحن بعد
-        try:
-            last_dt_str = (last.get("recorded_at") or "").replace("T", " ").replace("Z", "")
-            if "." in last_dt_str:
-                last_dt_str = last_dt_str.split(".")[0]
-            last_dt = datetime.datetime.strptime(last_dt_str, "%Y-%m-%d %H:%M:%S")
+        last_dt = _parse_db_time(last.get("recorded_at"))
+        if last_dt:
             elapsed_h = (now - last_dt).total_seconds() / 3600.0
             if elapsed_h < HEARTBEAT_HOURS:
                 should_log = False
                 reason = f"السعر ثابت (آخر تسجيل قبل {elapsed_h:.1f} ساعة، أقل من {HEARTBEAT_HOURS})"
             else:
                 reason = f"نبضة تأكيد كل {HEARTBEAT_HOURS} ساعات (السعر ما زال ثابتاً)"
-        except Exception:
-            pass  # لو فشل تحليل التاريخ، الأسلم أننا نسجّل بدل ما نفوّت بيانات
+        # لو فشل تحليل التاريخ، الأسلم أننا نسجّل بدل ما نفوّت بيانات
 
     if not should_log:
         return jsonify({"ok": True, "skipped": True, "reason": reason})
 
     row = {
         "recorded_at":     now.strftime("%Y-%m-%d %H:%M:%S"),
-        "source":          "cron",
+        "source":          source,
         "xau_local_avg":   prices.get("gold_999"),
         "xag_local_avg":   prices.get("silver_999"),
         "fx_eur_dzd":      prices.get("eur"),
