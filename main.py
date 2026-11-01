@@ -309,81 +309,162 @@ def _fx_ok(fx):
         return False
 
 
-def _fetch_fx():
-    """أسعار الصرف بالسوق الموازي: eurodz أولاً ثم devisesalgerie. يرجع (fx, اسم_المصدر)."""
-    errors = []
-    for name, fn in (("eurodz", _fetch_eurodz), ("devisesalgerie", _fetch_devisesalgerie)):
+# ══════════════════════════════════════════════════════════════════════════
+#  نظام المصادر المتعددة
+#  لكل نوع بيانات قائمة مصادر تُجرَّب بالترتيب: أول مصدر ناجح يُعتمد. وفي كل طلب جديد
+#  يبدأ الترتيب من المصدر الأول، فإذا عاد الأساسي للعمل عُدنا إليه تلقائياً.
+#  لإضافة مصدر: اكتب دالة تُرجع البيانات (أو ترفع خطأ) ثم أضف سطراً في القائمة المناسبة.
+# ══════════════════════════════════════════════════════════════════════════
+SOURCE_STATUS = {}   # حالة كل مصدر منذ آخر تشغيل للخدمة (في الذاكرة فقط) — تُعرض في /sources
+
+
+def _note(label, ok, err=None):
+    st = SOURCE_STATUS.setdefault(label, {})
+    st["ok"] = ok
+    stamp = _now_algeria().strftime("%Y-%m-%d %H:%M:%S")
+    if ok:
+        st["ok_at"] = stamp
+    else:
+        st["fail_at"] = stamp
+        st["last_error"] = str(err)[:200]
+
+
+def _try_sources(what, sources, validate=None):
+    """sources = [(اسم, دالة)]. يرجع (القيمة, اسم_المصدر_الناجح, {مصدر_فاشل: سبب})."""
+    errors = {}
+    for label, fn in sources:
         try:
-            fx = fn()
-            if _fx_ok(fx):
-                return fx, name
-            errors.append("%s: بيانات غير صالحة" % name)
+            v = fn()
+            if not v or (validate and not validate(v)):
+                raise RuntimeError("بيانات غير صالحة")
+            _note(label, True)
+            return v, label, errors
         except Exception as e:
-            errors.append("%s: %s" % (name, e))
-    raise RuntimeError("تعذّر جلب أسعار الصرف من كل المصادر — " + "; ".join(errors))
+            _note(label, False, e)
+            errors[label] = str(e)[:200]
+            print(f"فشل المصدر {label} ({what}): {e}")
+    raise RuntimeError("تعذّر جلب %s من كل المصادر — %s" % (
+        what, "; ".join("%s: %s" % kv for kv in errors.items())))
+
+
+# ── أسعار الصرف بالسوق الموازي (دج لكل يورو/دولار) ──
+FX_SOURCES = [
+    ("eurodz",         _fetch_eurodz),
+    ("devisesalgerie", _fetch_devisesalgerie),
+]
+
+
+def _fetch_fx():
+    return _try_sources("أسعار الصرف", FX_SOURCES, _fx_ok)
+
+
+# ── سعر 1 دولار باليورو ──
+def _rate_from_json(url):
+    def fn():
+        r = requests.get(url, headers=HTTP_HEADERS, timeout=10)
+        r.raise_for_status()
+        return float(r.json()["rates"]["EUR"])
+    return fn
+
+
+def _usd_eur_from_official(fx):
+    def fn():
+        return fx["USD"]["official"] / fx["EUR"]["official"]   # (دج/$) ÷ (دج/€) = €/$
+    return fn
 
 
 def _fetch_usd_eur(fx):
-    """سعر 1 دولار باليورو. مصادر بالترتيب: frankfurter (ECB) ← open.er-api ← أسعار eurodz الرسمية."""
-    for url in ("https://api.frankfurter.dev/v1/latest?base=USD&symbols=EUR",
-                "https://open.er-api.com/v6/latest/USD"):
-        try:
-            r = requests.get(url, headers=HTTP_HEADERS, timeout=10)
-            r.raise_for_status()
-            v = float(r.json()["rates"]["EUR"])
-            if 0.5 < v < 1.5:
-                return v, url.split("/")[2]
-        except Exception as e:
-            print(f"فشل مصدر USD/EUR {url}: {e}")
-    try:
-        off_eur = fx["EUR"]["official"]
-        off_usd = fx["USD"]["official"]
-        v = off_usd / off_eur          # (دج/$) ÷ (دج/€) = €/$
-        if 0.5 < v < 1.5:
-            return v, "eurodz-official"
-    except Exception:
-        pass
-    raise RuntimeError("تعذّر جلب سعر USD/EUR من كل المصادر")
+    sources = [
+        ("frankfurter",     _rate_from_json("https://api.frankfurter.dev/v1/latest?base=USD&symbols=EUR")),
+        ("open.er-api",     _rate_from_json("https://open.er-api.com/v6/latest/USD")),
+        ("eurodz-official", _usd_eur_from_official(fx)),
+    ]
+    return _try_sources("سعر USD/EUR", sources, lambda v: 0.5 < v < 1.5)
 
 
-def _fetch_metals_fallback(usd_eur, metals):
-    """احتياطي إذا فشل suissegold: سعر الأونصة بالدولار من gold-api.com ثم التحويل إلى € للغرام."""
-    out = {}
-    for metal in metals:
-        sym = {"gold": "XAU", "silver": "XAG"}[metal]
+# ── الذهب والفضة: كل مصدر يرجع {'gold': €/غرام, 'silver': €/غرام} (قد يكون جزئياً) ──
+def _metals_suisse(usd_eur):
+    return _fetch_suisse_metals()
+
+
+def _per_metal(usd_eur, fetch_usd_oz):
+    """يحوّل سعر الأونصة بالدولار إلى € للغرام لكل معدن، ويتحمّل فشل أحد المعدنين."""
+    out, last = {}, None
+    for metal, sym in (("gold", "XAU"), ("silver", "XAG")):
         try:
-            r = requests.get(f"https://api.gold-api.com/price/{sym}", headers=HTTP_HEADERS, timeout=10)
-            r.raise_for_status()
-            usd_oz = float(r.json()["price"])
+            usd_oz = fetch_usd_oz(sym)
             if usd_oz > 0:
                 out[metal] = usd_oz * usd_eur / OZ_GRAMS
         except Exception as e:
-            print(f"فشل الاحتياطي لـ {metal}: {e}")
+            last = e
+    if not out:
+        raise RuntimeError(str(last) if last else "لا بيانات")
     return out
+
+
+def _metals_goldapi(usd_eur):
+    def usd_oz(sym):
+        r = requests.get(f"https://api.gold-api.com/price/{sym}", headers=HTTP_HEADERS, timeout=10)
+        r.raise_for_status()
+        return float(r.json()["price"])
+    return _per_metal(usd_eur, usd_oz)
+
+
+def _metals_swissquote(usd_eur):
+    # ⚠️ غير مُتحقَّق منه على الشبكة الحقيقية؛ إن لم ينجح يظهر السبب في /sources ولا يضرّ بالباقي
+    def usd_oz(sym):
+        url = f"https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/{sym}/USD"
+        r = requests.get(url, headers=HTTP_HEADERS, timeout=10)
+        r.raise_for_status()
+        p = r.json()[0]["spreadProfilePrices"][0]
+        return (float(p["bid"]) + float(p["ask"])) / 2
+    return _per_metal(usd_eur, usd_oz)
+
+
+METAL_SOURCES = [
+    ("suissegold",   _metals_suisse),
+    ("gold-api.com", _metals_goldapi),
+    ("swissquote",   _metals_swissquote),
+]
+
+
+def _collect_metals(usd_eur):
+    """يكمل الذهب والفضة من المصادر بالترتيب (كل معدن قد يأتي من مصدر مختلف)."""
+    got, used, errors = {}, {}, {}
+    for label, fn in METAL_SOURCES:
+        if len(got) == 2:
+            break
+        try:
+            data = fn(usd_eur)
+            new = False
+            for m in ("gold", "silver"):
+                if m not in got and (data.get(m) or 0) > 0:
+                    got[m], used[m], new = data[m], label, True
+            if not new:
+                raise RuntimeError("لا بيانات جديدة")
+            _note(label, True)
+        except Exception as e:
+            _note(label, False, e)
+            errors[label] = str(e)[:200]
+            print(f"فشل المصدر {label} (الذهب/الفضة): {e}")
+    if len(got) < 2:
+        raise RuntimeError("تعذّر جلب الذهب/الفضة من كل المصادر — " +
+                           "; ".join("%s: %s" % kv for kv in errors.items()))
+    return got, used, errors
 
 
 def compute_prices_direct():
     """يرجع (prices, info) بنفس مفاتيح _extract_new حتى يعمل باقي الكود كما هو."""
-    fx, fx_src = _fetch_fx()
-    usd_eur, usd_eur_src = _fetch_usd_eur(fx)      # مثل FX_USD_EUR (0.8927)
-    eur_usd = 1.0 / usd_eur                        # مثل F4 في الشيت (1.1204)
+    fx, fx_src, fx_err = _fetch_fx()
+    usd_eur, usd_eur_src, ue_err = _fetch_usd_eur(fx)   # مثل FX_USD_EUR (0.8927)
+    eur_usd = 1.0 / usd_eur                             # مثل F4 في الشيت (1.1204)
+    g, used, m_err = _collect_metals(usd_eur)
 
-    info = {"fx_source": fx_src, "usd_eur_source": usd_eur_src, "metals_source": "suissegold"}
-    try:
-        g = _fetch_suisse_metals()
-    except Exception as e:
-        print(f"فشل suissegold: {e}")
-        info["suisse_error"] = str(e)[:200]
-        g = {}
-    missing = [m for m in ("gold", "silver") if not g.get(m)]
-    if missing:
-        fb = _fetch_metals_fallback(usd_eur, missing)
-        g.update(fb)
-        info["metals_source"] = "fallback" if len(missing) == 2 else "suissegold + fallback"
-        info["fallback_used_for"] = sorted(fb)      # المعادن التي جاءت من المصدر الاحتياطي
-    if not g.get("gold") or not g.get("silver"):
-        raise RuntimeError("تعذّر جلب سعر الذهب/الفضة من كل المصادر")
-    info["gram_eur"] = g
+    info = {"fx_source": fx_src, "usd_eur_source": usd_eur_src,
+            "metals_sources": used, "gram_eur": g}
+    errs = {**fx_err, **ue_err, **m_err}
+    if errs:
+        info["source_errors"] = errs        # المصادر التي فشلت في هذه الجولة وأسبابها
 
     eur_sell, usd_sell = fx["EUR"]["sell"], fx["USD"]["sell"]
 
@@ -820,6 +901,16 @@ def health():
                key="stale", every_h=3)
     return jsonify({"ok": ok, "last_record_hours_ago": round(age, 2),
                     "max_hours": HEALTH_MAX_HOURS}), (200 if ok else 503)
+
+
+@app.route("/sources")
+def sources_status():
+    """حالة كل مصدر منذ آخر تشغيل للخدمة: أي مصدر يعمل وأيها معطّل ولماذا (محمي بنفس التوكن)."""
+    denied = _check_log_auth()
+    if denied:
+        return denied
+    return jsonify({"ok": True, "sources": SOURCE_STATUS,
+                    "note": "الحالة في الذاكرة فقط وتُصفَّر عند إعادة تشغيل الخدمة"})
 
 
 @app.route("/debug")
