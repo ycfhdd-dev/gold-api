@@ -233,26 +233,67 @@ def _parse_db_time(s):
     return datetime.datetime.strptime(m.group(1) + " " + m.group(2), "%Y-%m-%d %H:%M:%S")
 
 
-def _fetch_suisse_metals():
-    """سعر غرام الذهب والفضة باليورو من بطاقات suissegold: {'gold': .., 'silver': ..}"""
+# حدود معقولة لسعر الغرام باليورو: تحمي من خطأ الوحدة (أونصة/كيلو) أو العملة
+GRAM_EUR_RANGE = {"gold": (20.0, 1000.0), "silver": (0.2, 15.0)}   # الفضة: أونصتها ≈ 45 € فلا تُقبل بدل الغرام
+
+
+def _eur_rate(code, usd_eur=None):
+    """كم يورو يساوي 1 من العملة code."""
+    if code == "EUR":
+        return 1.0
+    if code == "USD" and usd_eur:
+        return usd_eur
+    r = requests.get(f"https://api.frankfurter.dev/v1/latest?base={code}&symbols=EUR",
+                     headers=HTTP_HEADERS, timeout=10)
+    r.raise_for_status()
+    return float(r.json()["rates"]["EUR"])
+
+
+def _parse_price_text(text):
+    """'114.67 EUR' أو 'EUR 114.67' → (114.67, 'EUR') وإلا None."""
+    m = re.search(r"([\d][\d.,]*)\s*([A-Z]{3})\b", text)
+    if m:
+        return _to_float(m.group(1)), m.group(2)
+    m = re.search(r"\b([A-Z]{3})\s*([\d][\d.,]*)", text)
+    if m:
+        return _to_float(m.group(2)), m.group(1)
+    return None
+
+
+def _fetch_suisse_metals(usd_eur=None):
+    """سعر غرام الذهب والفضة باليورو من بطاقات suissegold: {'gold': .., 'silver': ..}.
+    يقبل أي عملة يعرضها الموقع للخادم ويحوّلها إلى يورو، ويرفض القيم خارج الحدود المعقولة."""
     r = requests.get(SUISSE_URL, headers=HTTP_HEADERS, timeout=15)
     r.raise_for_status()
     html = r.text
-    out = {}
+    out, seen = {}, []
     for metal in ("gold", "silver"):
         pattern = r'<a\b[^>]*href="[^"]*charts/%s"[^>]*>(.*?)</a>' % metal
         for a in re.finditer(pattern, html, re.S | re.I):
-            # يشترط ظهور EUR بعد الرقم: لو تغيّرت العملة الافتراضية للموقع لا نقبل الرقم
-            m = re.search(r'class="price"[^>]*>\s*([\d.,]+)\s*EUR', a.group(1), re.I)
-            if m:
-                val = _to_float(m.group(1))
-                if val and val > 0:
-                    out[metal] = val
-                    break
+            box = re.search(r'class="price"[^>]*>(.*?)</div>', a.group(1), re.S | re.I)
+            if not box:
+                continue
+            text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", box.group(1))).strip()
+            seen.append("%s: %s" % (metal, text[:40]))
+            parsed = _parse_price_text(text)
+            if not parsed or not parsed[0] or parsed[0] <= 0:
+                continue
+            val, code = parsed
+            try:
+                val = val * _eur_rate(code, usd_eur)
+            except Exception as e:
+                seen.append("تحويل %s→EUR فشل: %s" % (code, e))
+                continue
+            lo, hi = GRAM_EUR_RANGE[metal]
+            if lo < val < hi:
+                out[metal] = val
+                break
+            seen.append("%s خارج الحدود: %.4f €" % (metal, val))
     if not out:
         title = re.search(r"<title>(.*?)</title>", html, re.S | re.I)
-        raise RuntimeError("suissegold: لا توجد أسعار EUR في الصفحة (الطول %d، العنوان: %s)" % (
-            len(html), (title.group(1).strip()[:60] if title else "بلا عنوان")))
+        raise RuntimeError("suissegold: لا سعر صالحاً (الطول %d، العنوان: %s) ما ظهر للخادم: %s" % (
+            len(html), (title.group(1).strip()[:40] if title else "بلا عنوان"),
+            " | ".join(seen[:4]) or "لا عناصر price في الصفحة"))
     return out
 
 
@@ -384,7 +425,7 @@ def _fetch_usd_eur(fx):
 
 # ── الذهب والفضة: كل مصدر يرجع {'gold': €/غرام, 'silver': €/غرام} (قد يكون جزئياً) ──
 def _metals_suisse(usd_eur):
-    return _fetch_suisse_metals()
+    return _fetch_suisse_metals(usd_eur)
 
 
 def _per_metal(usd_eur, fetch_usd_oz):
