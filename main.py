@@ -11,6 +11,7 @@ HEARTBEAT_HOURS = 4
 SUPABASE_URL   = os.environ.get("SUPABASE_URL", "").rstrip("/")   # مثال: https://xxxx.supabase.co
 SUPABASE_KEY   = os.environ.get("SUPABASE_KEY", "")               # service_role key
 LOG_TOKEN      = os.environ.get("LOG_TOKEN", "")                  # سرّ بسيط لحماية /log
+FOREX_KEY      = os.environ.get("FOREXALGERIE_KEY", "")           # قيمة afous لنقطة forexalgerie (لا تُكتب في الكود: المستودع عام)
 ALERT_CHAT_ID  = os.environ.get("ALERT_CHAT_ID", "")              # (اختياري) محادثتك الخاصة لتنبيهات الأعطال
 
 app = Flask(__name__)
@@ -341,6 +342,19 @@ def _fetch_devisesalgerie():
     return out
 
 
+def _fetch_forexalgerie():
+    """المصدر الثالث للصرف: نقطة JSON على forexalgerie.com (نفس طلب سكريبت Apps Script القديم)."""
+    if not FOREX_KEY:
+        raise RuntimeError("FOREXALGERIE_KEY غير مضبوط في Render")
+    r = requests.post("https://www.forexalgerie.com/connect/updateExchange.php",
+                      data={"afous": FOREX_KEY}, headers=HTTP_HEADERS, timeout=15)
+    r.raise_for_status()
+    d = r.json()[0]
+    return {code: {"buy": float(d[code.lower() + "_buy"]),
+                   "sell": float(d[code.lower() + "_sell"]), "official": None}
+            for code in ("EUR", "USD")}
+
+
 def _fx_ok(fx):
     """يتأكد أن صفّي EUR/USD موجودان وبأسعار معقولة (دج لكل وحدة)."""
     try:
@@ -392,6 +406,7 @@ def _try_sources(what, sources, validate=None):
 FX_SOURCES = [
     ("eurodz",         _fetch_eurodz),
     ("devisesalgerie", _fetch_devisesalgerie),
+    ("forexalgerie",   _fetch_forexalgerie),
 ]
 
 
